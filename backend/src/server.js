@@ -6,6 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const { notify, bookingConfirmedMsg, statusUpdateMsg, driverAssignedCustomerMsg, tripAssignedDriverMsg } = require('./notify');
+const { calcDistanceKm, mapsConfigured, GOOGLE_MAPS_BROWSER_KEY } = require('./maps');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -190,6 +191,26 @@ app.patch('/api/driver/bookings/:id/status', driverOnly, (req, res) => {
 // ---------- public: vehicles / drivers (read-only) ----------
 app.get('/api/vehicles', (req, res) => {
   res.json(db.prepare('SELECT * FROM vehicles ORDER BY name').all());
+});
+
+// ---------- maps ----------
+// Public, safe-to-expose config for the frontend (the Maps browser key is
+// meant to be public — restrict it by HTTP referrer in Google Cloud Console).
+app.get('/api/config', (req, res) => {
+  res.json({ mapsBrowserKey: GOOGLE_MAPS_BROWSER_KEY || '', mapsEnabled: mapsConfigured });
+});
+
+app.get('/api/distance', async (req, res) => {
+  const { pickup, drop } = req.query;
+  if (!pickup || !drop) return res.status(400).json({ error: 'pickup and drop are required' });
+  if (!mapsConfigured) return res.status(501).json({ error: 'Distance auto-calc not configured' });
+  try {
+    const result = await calcDistanceKm(String(pickup), String(drop));
+    res.json(result);
+  } catch (e) {
+    console.error('[maps] distance lookup failed:', e.message);
+    res.status(422).json({ error: 'Could not calculate distance for that route. Please enter it manually.' });
+  }
 });
 app.get('/api/drivers', (req, res) => {
   // Explicit column list — never expose pin_hash, even by accident.
