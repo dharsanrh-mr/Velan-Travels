@@ -36,9 +36,19 @@ CREATE TABLE IF NOT EXISTS drivers (
   pin_hash TEXT,
   vehicle_id INTEGER,
   status TEXT NOT NULL DEFAULT 'AVAILABLE',
+  pin_is_default INTEGER NOT NULL DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL
+);
+
+-- DB-backed sessions: survive server restarts and work across multiple
+-- server instances (unlike the old in-memory Map).
+CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,          -- 'admin' | 'driver'
+  subject TEXT NOT NULL,       -- admin email, or driver id (as text)
+  expires_at INTEGER NOT NULL  -- epoch ms
 );
 
 CREATE TABLE IF NOT EXISTS bookings (
