@@ -1,1 +1,64 @@
+PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS admins (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS customers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  mobile TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS vehicles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  vehicle_number TEXT UNIQUE NOT NULL,
+  seating_capacity INTEGER NOT NULL,
+  base_fare REAL NOT NULL DEFAULT 0,
+  rate_per_km REAL NOT NULL DEFAULT 0,
+  ac INTEGER NOT NULL DEFAULT 1,
+  fuel_type TEXT NOT NULL DEFAULT 'Diesel',
+  status TEXT NOT NULL DEFAULT 'AVAILABLE',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS drivers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  mobile TEXT NOT NULL,
+  pin_hash TEXT,
+  vehicle_id INTEGER,
+  status TEXT NOT NULL DEFAULT 'AVAILABLE',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS bookings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  booking_id TEXT UNIQUE NOT NULL,
+  customer_id INTEGER NOT NULL,
+  pickup_location TEXT NOT NULL,
+  drop_location TEXT NOT NULL,
+  journey_date TEXT NOT NULL,
+  journey_time TEXT NOT NULL,
+  vehicle_id INTEGER,
+  driver_id INTEGER,
+  passengers INTEGER NOT NULL,
+  additional_requirements TEXT,
+  estimated_distance_km REAL,
+  estimated_fare REAL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE,
+  FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL,
+  FOREIGN KEY(driver_id) REFERENCES drivers(id) ON DELETE SET NULL
+);
