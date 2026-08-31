@@ -34,7 +34,9 @@ Demo admin:
 
 > **Upgrading from the original Phase-1 build?** The schema added new columns (`vehicles.base_fare`, `vehicles.rate_per_km`, `vehicles.ac`, `vehicles.fuel_type`, `bookings.estimated_distance_km`, `bookings.estimated_fare`) and a real `admins` table. Since `CREATE TABLE IF NOT EXISTS` won't alter an existing table, delete the old `velan-travels.db` file before starting so it's recreated with the new schema (you'll lose any existing demo data — re-seed with `database/seed.sql` if needed).
 
-> **Upgrading again — driver login now requires a PIN.** `drivers.pin_hash` is added automatically to an existing DB on startup (no need to delete it this time). Any driver that doesn't have a PIN yet is auto-assigned one equal to the last 4 digits of their mobile number, and the server logs it on startup — tell drivers to change it from the admin panel. New drivers must be given a 4–6 digit PIN when added.
+> **Upgrading again — driver login now requires a PIN.** `drivers.pin_hash` is added automatically to an existing DB on startup (no need to delete it this time). Any driver that doesn't have a PIN yet is auto-assigned one equal to the last 4 digits of their mobile number, and the server logs it on startup — they'll be prompted to change it on their next login (see below).
+
+> **Upgrading again — DB-backed sessions, driver PIN force-change, admin pagination.** All automatic on startup, no need to delete the DB: a `sessions` table replaces the old in-memory session store (admin/driver logins now survive a restart), and `drivers.pin_is_default` is added to track who's still on their auto-assigned default PIN.
 
 ## SMS / WhatsApp notifications
 Optional — off by default in the sense that with no Twilio credentials, every notification is just printed to the server console instead of sent, so nothing breaks if you skip this.
@@ -69,14 +71,18 @@ POST `/api/bookings`
 GET `/api/bookings/:bookingId`
 GET `/api/admin/dashboard` *(admin)*
 GET `/api/admin/analytics` *(admin)* — revenue by month, top routes, top vehicles
-GET `/api/admin/customers?q=` *(admin)*
+GET `/api/admin/customers?q=` *(admin)* — paginated (`?limit=&offset=`, default 50/page), total count in `X-Total-Count` header
 GET `/api/admin/activity` *(admin)* — recent booking activity feed
 PATCH `/api/admin/settings/password` *(admin)*
-GET `/api/admin/bookings?status=&date=&q=` *(admin)*
+GET `/api/admin/bookings?status=&date=&q=` *(admin)* — paginated (`?limit=&offset=`, default 50/page), total count in `X-Total-Count` header
 PATCH `/api/admin/bookings/:id/status` *(admin)*
 PATCH `/api/admin/bookings/:id/driver` *(admin)*
 GET `/api/config` — public frontend config (Maps browser key, if set)
 GET `/api/distance?pickup=&drop=` — auto distance calc (Google Distance Matrix)
+POST `/api/driver/login`
+PATCH `/api/driver/pin` *(driver)* — change own PIN (required when login returns `pinIsDefault: true`)
+GET `/api/driver/bookings` *(driver)*
+PATCH `/api/driver/bookings/:id/status` *(driver)*
 GET `/api/vehicles`
 POST `/api/admin/vehicles` *(admin)*
 PATCH `/api/admin/vehicles/:id` *(admin)*
@@ -106,8 +112,8 @@ PATCH `/api/admin/drivers/:id` *(admin)*
 Whichever host you pick, remember the in-memory session store note below — a restart logs every admin out, and it won't work if you ever scale to more than one server instance.
 
 ## Notes for further hardening (production)
-- Sessions are kept in-memory (`Map`) — they reset on server restart and won't work across multiple server instances. Move to a database-backed or Redis session store for production/scale.
-- Add HTTPS in front of this (reverse proxy / hosting platform).
-- Consider rate-limiting `/api/auth/login` and `/api/driver/login` against brute force.
-- Admin-set driver PINs currently have no format check beyond 4–6 digits — consider forcing drivers to change the default (last-4-of-mobile) PIN on first login.
-- `/api/admin/bookings` and `/api/admin/customers` are capped at 500 rows per request (`?limit=&offset=` to page). The current admin UI doesn't have pagination controls yet — add them if booking volume grows past that.
+- ~~Sessions are kept in-memory~~ — now stored in a `sessions` table in SQLite, so admin/driver logins survive a server restart. Still not multi-instance-safe as written (SQLite is single-file) — move to Postgres/Redis if you ever run more than one server instance behind a load balancer.
+- Add HTTPS in front of this (reverse proxy / hosting platform) — see the Deploying section above.
+- ~~Consider rate-limiting `/api/auth/login` and `/api/driver/login`~~ — done: both are capped at 8 attempts per 15 minutes per IP+identifier, returning 429 with a `Retry-After` header once exceeded. It's in-memory (resets on restart) — fine for a single instance; swap for a Redis-backed limiter if you scale out.
+- ~~Admin-set driver PINs currently have no format check beyond 4–6 digits — consider forcing drivers to change the default (last-4-of-mobile) PIN on first login~~ — done: `drivers.pin_is_default` tracks this, `/api/driver/login` returns `pinIsDefault: true` when it applies, and the driver app forces a PIN-change screen before showing trips. Drivers can also change their PIN anytime from the "Change PIN" button on their trips dashboard.
+- ~~`/api/admin/bookings` and `/api/admin/customers` are capped at 500 rows per request... current admin UI doesn't have pagination controls yet~~ — done: both endpoints now default to 50 rows/page (still cap at 500 via `?limit=`) and return an `X-Total-Count` header; the Bookings and Customers admin pages have Prev/Next controls.
