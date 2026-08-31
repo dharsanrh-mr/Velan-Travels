@@ -10,6 +10,32 @@ const api = async (url, opt = {}) => {
   if (!r.ok) throw Error(d.error || 'Request failed');
   return d;
 };
+// Same as api(), but also reads the X-Total-Count header (used by paginated
+// admin list endpoints) so callers can build page controls.
+const apiPaged = async (url, opt = {}) => {
+  opt.headers = { ...(opt.headers || {}), 'Content-Type': 'application/json' };
+  if (token) opt.headers.Authorization = 'Bearer ' + token;
+  const r = await fetch(url, opt);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw Error(d.error || 'Request failed');
+  const total = Number(r.headers.get('X-Total-Count'));
+  return { rows: d, total: Number.isFinite(total) ? total : d.length };
+};
+const PAGE_SIZE = 50;
+// Renders "‹ Prev  Page 2 of 5 (73 total)  Next ›" — onPage(newOffset) is
+// called when the user clicks a still-enabled button.
+function paginationBar(offset, total, pageSize, onPageId) {
+  if (total <= pageSize) return '';
+  const page = Math.floor(offset / pageSize) + 1;
+  const pages = Math.ceil(total / pageSize);
+  const prevOffset = Math.max(0, offset - pageSize);
+  const nextOffset = offset + pageSize;
+  return `<div class="pagination-bar" style="display:flex;align-items:center;justify-content:center;gap:14px;margin-top:14px;font-size:13px;color:var(--muted)">
+    <button type="button" class="btn secondary" id="${onPageId}Prev" ${offset === 0 ? 'disabled' : ''} data-offset="${prevOffset}" style="padding:6px 14px">‹ Prev</button>
+    <span>Page ${page} of ${pages} (${total} total)</span>
+    <button type="button" class="btn secondary" id="${onPageId}Next" ${nextOffset >= total ? 'disabled' : ''} data-offset="${nextOffset}" style="padding:6px 14px">Next ›</button>
+  </div>`;
+}
 const todayStr = () => new Date().toISOString().slice(0, 10);
 const money = n => n == null ? '-' : '₹' + Number(n).toLocaleString('en-IN');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -846,10 +872,10 @@ async function analytics() {
 }
 
 // ---------------- Admin: Bookings ----------------
-async function bookings(filters = {}) {
+async function bookings(filters = {}, offset = 0) {
   loading(true);
-  const [bs, ds] = await Promise.all([
-    api('/api/admin/bookings?' + new URLSearchParams(filters)),
+  const [{ rows: bs, total }, ds] = await Promise.all([
+    apiPaged('/api/admin/bookings?' + new URLSearchParams({ ...filters, limit: PAGE_SIZE, offset })),
     api('/api/drivers')
   ]);
   bs.forEach(b => bookingCache[b.id] = b);
@@ -882,17 +908,21 @@ async function bookings(filters = {}) {
     </select></td>
     <td><button class="icon-btn" title="View" onclick="showBookingDetail(${b.id})">${ICON.eye}</button></td>
   </tr>`).join('') : `<tr><td colspan="9" class="empty">No bookings found</td></tr>`}
-  </tbody></table></div>`);
+  </tbody></table></div>
+  ${paginationBar(offset, total, PAGE_SIZE, 'bookings')}`);
 
   document.getElementById('filterForm').onsubmit = e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     Object.keys(f).forEach(k => { if (!f[k]) delete f[k]; });
-    bookings(f);
+    bookings(f, 0);
   };
   const clearBtn = document.getElementById('clearFilters');
-  if (clearBtn) clearBtn.onclick = () => bookings({});
+  if (clearBtn) clearBtn.onclick = () => bookings({}, 0);
   document.getElementById('exportBtn').onclick = () => exportBookingsCsv(filters);
+  const prevBtn = document.getElementById('bookingsPrev'), nextBtn = document.getElementById('bookingsNext');
+  if (prevBtn) prevBtn.onclick = () => bookings(filters, Number(prevBtn.dataset.offset));
+  if (nextBtn) nextBtn.onclick = () => bookings(filters, Number(nextBtn.dataset.offset));
 }
 async function changeStatus(id, status) {
   await api('/api/admin/bookings/' + id + '/status', { method: 'PATCH', body: JSON.stringify({ status }) });
@@ -1021,9 +1051,36 @@ function driverLogin() {
     try {
       const r = await driverApi('/api/driver/login', { method: 'POST', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
       driverToken = r.token; driverName = r.driver.name;
+      if (r.pinIsDefault) return driverForcePinChange();
       driverTrips();
     } catch (x) {
       document.getElementById('dle').textContent = x.message;
+    }
+  };
+}
+
+// Shown right after login when the driver is still on the auto-assigned
+// default PIN (last 4 digits of their mobile) — they must set a real one
+// before they can see their trips.
+function driverForcePinChange() {
+  shell(`<section class="page narrow">
+    <h1>Set a New PIN</h1>
+    <p style="color:var(--muted)">You're still using the default PIN. Please choose a new 4–6 digit PIN to continue.</p>
+    <div class="card">
+      <form id="pinf" style="display:flex;flex-direction:column;gap:14px">
+        <div class="field"><label>New PIN</label><input name="newPin" type="password" inputmode="numeric" placeholder="4–6 digit PIN" pattern="[0-9]{4,6}" required></div>
+        <button class="btn block">Save PIN &amp; Continue</button>
+        <p id="pinErr" class="error"></p>
+      </form>
+    </div>
+  </section>`);
+  document.getElementById('pinf').onsubmit = async e => {
+    e.preventDefault();
+    try {
+      await driverApi('/api/driver/pin', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
+      driverTrips();
+    } catch (x) {
+      document.getElementById('pinErr').textContent = x.message;
     }
   };
 }
@@ -1038,7 +1095,10 @@ async function driverTrips() {
     shell(`<section class="page">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
       <h1 style="margin:0">My Trips${driverName ? ' — ' + esc(driverName) : ''}</h1>
-      <button class="btn secondary" id="driverLogoutBtn">Logout</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn secondary" id="driverChangePinBtn">Change PIN</button>
+        <button class="btn secondary" id="driverLogoutBtn">Logout</button>
+      </div>
     </div>
     <div class="grid" style="padding:0">
     ${trips.length ? trips.map(t => `<div class="card">
@@ -1056,6 +1116,7 @@ async function driverTrips() {
     document.getElementById('driverLogoutBtn').onclick = () => {
       driverToken = ''; driverName = ''; location.hash = ''; router();
     };
+    document.getElementById('driverChangePinBtn').onclick = () => driverForcePinChange();
   } catch (x) {
     driverToken = ''; driverLogin();
   }
@@ -1074,9 +1135,9 @@ async function updateTripStatus(bookingId) {
 }
 
 // ---------------- Admin: Customers ----------------
-async function customers(filters = {}) {
+async function customers(filters = {}, offset = 0) {
   loading(true);
-  const cs = await api('/api/admin/customers?' + new URLSearchParams(filters));
+  const { rows: cs, total } = await apiPaged('/api/admin/customers?' + new URLSearchParams({ ...filters, limit: PAGE_SIZE, offset }));
   adminShell('customers', 'Customers', `
   <form id="custFilterForm" class="filter-bar">
     <input name="q" placeholder="Search name / mobile" value="${esc(filters.q || '')}" style="flex:1;min-width:200px">
@@ -1093,15 +1154,19 @@ async function customers(filters = {}) {
     <td>${money(c.total_spend)}</td>
     <td>${esc(String(c.created_at || '').slice(0, 10))}</td>
   </tr>`).join('') : `<tr><td colspan="5" class="empty">No customers found</td></tr>`}
-  </tbody></table></div>`);
+  </tbody></table></div>
+  ${paginationBar(offset, total, PAGE_SIZE, 'customers')}`);
   document.getElementById('custFilterForm').onsubmit = e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     Object.keys(f).forEach(k => { if (!f[k]) delete f[k]; });
-    customers(f);
+    customers(f, 0);
   };
   const clearBtn = document.getElementById('clearCustFilter');
-  if (clearBtn) clearBtn.onclick = () => customers({});
+  if (clearBtn) clearBtn.onclick = () => customers({}, 0);
+  const prevBtn = document.getElementById('customersPrev'), nextBtn = document.getElementById('customersNext');
+  if (prevBtn) prevBtn.onclick = () => customers(filters, Number(prevBtn.dataset.offset));
+  if (nextBtn) nextBtn.onclick = () => customers(filters, Number(nextBtn.dataset.offset));
 }
 
 // ---------------- Admin: Settings ----------------
