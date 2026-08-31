@@ -14,6 +14,63 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 const money = n => n == null ? '-' : '₹' + Number(n).toLocaleString('en-IN');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// ---------------- Google Maps: auto distance calc (optional) ----------------
+// Loads config once, lazily injects the Places script only if a browser key
+// is configured, and hooks up autocomplete + auto distance-fill on the
+// booking wizard's pickup/drop fields. Degrades to the old manual "approx.
+// distance" entry if no key is set or a lookup fails.
+let mapsConfigPromise = null;
+function getMapsConfig() {
+  if (!mapsConfigPromise) mapsConfigPromise = api('/api/config').catch(() => ({ mapsBrowserKey: '', mapsEnabled: false }));
+  return mapsConfigPromise;
+}
+let mapsScriptPromise = null;
+function loadGoogleMapsScript(key) {
+  if (mapsScriptPromise) return mapsScriptPromise;
+  mapsScriptPromise = new Promise((resolve, reject) => {
+    if (window.google?.maps?.places) return resolve();
+    window.__vtMapsReady = () => resolve();
+    const s = document.createElement('script');
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&libraries=places&callback=__vtMapsReady`;
+    s.onerror = () => reject(new Error('Failed to load Google Maps'));
+    document.head.appendChild(s);
+  });
+  return mapsScriptPromise;
+}
+
+// Wires Places Autocomplete onto the given pickup/drop <input> elements and
+// calls onDistance(distanceKm, durationText) once both are set and the
+// backend distance lookup succeeds. Silently no-ops if Maps isn't configured.
+async function initRouteAutocomplete(pickupEl, dropEl, onDistance, onStatus) {
+  const cfg = await getMapsConfig();
+  if (!cfg.mapsEnabled || !cfg.mapsBrowserKey) return;
+  try {
+    await loadGoogleMapsScript(cfg.mapsBrowserKey);
+  } catch (e) {
+    console.warn('[maps]', e.message);
+    return;
+  }
+  const g = window.google;
+  const pickupAc = new g.maps.places.Autocomplete(pickupEl, { fields: ['formatted_address'] });
+  const dropAc = new g.maps.places.Autocomplete(dropEl, { fields: ['formatted_address'] });
+
+  const tryCalc = async () => {
+    const pickup = pickupEl.value.trim();
+    const drop = dropEl.value.trim();
+    if (!pickup || !drop) return;
+    onStatus?.('loading');
+    try {
+      const r = await api(`/api/distance?pickup=${encodeURIComponent(pickup)}&drop=${encodeURIComponent(drop)}`);
+      onDistance(r.distanceKm, r.durationText);
+      onStatus?.('ok', r);
+    } catch (e) {
+      onStatus?.('error', e.message);
+    }
+  };
+  pickupAc.addListener('place_changed', tryCalc);
+  dropAc.addListener('place_changed', tryCalc);
+}
+
 // ---------------- Driver session (separate from admin token) ----------------
 let driverToken = '';
 let driverName = '';
@@ -247,7 +304,11 @@ function renderWizardStep1() {
             <div class="field"><label>Date</label><input type="date" name="date" min="${todayStr()}" value="${esc(wz.date || '')}" required></div>
             <div class="field"><label>Time</label><input type="time" name="time" value="${esc(wz.time || '')}" required></div>
           </div>
-          <div class="field"><label>Approx. Distance (km) — optional, for fare estimate</label><input type="number" min="0" name="distanceKm" value="${esc(wz.distanceKm || '')}" placeholder="e.g. 120"></div>
+          <div class="field">
+            <label>Distance (km) — used for the fare estimate</label>
+            <input type="number" min="0" name="distanceKm" id="distanceKmInput" value="${esc(wz.distanceKm || '')}" placeholder="e.g. 120">
+            <p id="distanceStatus" style="font-size:11.5px;color:var(--muted);margin:4px 0 0">Enter pickup &amp; drop above to auto-calculate, or type it in yourself.</p>
+          </div>
         </form>
       </div>
     </div>
@@ -261,6 +322,20 @@ function renderWizardStep1() {
     wzStep = 2;
     booking();
   };
+
+  const distanceInput = document.getElementById('distanceKmInput');
+  const statusEl = document.getElementById('distanceStatus');
+  initRouteAutocomplete(
+    document.querySelector('#s1 input[name="pickup"]'),
+    document.querySelector('#s1 input[name="drop"]'),
+    (km, durationText) => { distanceInput.value = km; },
+    (state, data) => {
+      if (!statusEl) return;
+      if (state === 'loading') statusEl.textContent = 'Calculating distance…';
+      else if (state === 'ok') statusEl.textContent = `Auto-calculated: ${data.distanceKm} km (~${data.durationText} drive) — you can edit this if needed.`;
+      else if (state === 'error') statusEl.textContent = 'Could not auto-calculate — please enter the distance manually.';
+    }
+  );
 }
 
 async function renderWizardStep2() {
