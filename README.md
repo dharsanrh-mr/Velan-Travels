@@ -50,6 +50,18 @@ Trial Twilio accounts can only message phone numbers you've manually verified in
 
 Messages are sent for: new booking received, every status change (confirmed / driver assigned / on trip / completed / cancelled), and driver assignment (both the driver and the customer are notified, with each other's contact details). A failed send (bad number, Twilio error, etc.) is logged and never blocks the booking/status API call itself.
 
+## Google Maps auto distance calc
+Optional — off by default (no keys = the booking form falls back to manual "enter distance in km" like before, nothing breaks).
+
+To turn it on:
+1. In https://console.cloud.google.com, create/select a project and enable **Places API** and **Distance Matrix API**.
+2. Create two separate API keys (Credentials → Create Credentials → API key):
+   - **Browser key** → restrict by *HTTP referrers* to your site's domain(s), and by API to *Places API* only. Set as `GOOGLE_MAPS_BROWSER_KEY`. This one is sent to the browser on purpose (for the pickup/drop autocomplete box) — the referrer restriction is what keeps it safe to expose.
+   - **Server key** → restrict by *IP address* to your server, and by API to *Distance Matrix API* only. Set as `GOOGLE_MAPS_SERVER_KEY`. This one never leaves the server.
+3. Restart the server.
+
+With both set: pickup/drop fields on step 1 of the booking wizard get Google Places autocomplete, and once both are chosen the distance (km) field auto-fills from the Distance Matrix API — the customer can still edit it by hand if they want. Google's Distance Matrix API is billed per request past the free monthly credit; see https://mapsplatform.google.com/pricing/.
+
 ## API
 POST `/api/auth/login`
 POST `/api/auth/logout` *(admin)*
@@ -63,12 +75,35 @@ PATCH `/api/admin/settings/password` *(admin)*
 GET `/api/admin/bookings?status=&date=&q=` *(admin)*
 PATCH `/api/admin/bookings/:id/status` *(admin)*
 PATCH `/api/admin/bookings/:id/driver` *(admin)*
+GET `/api/config` — public frontend config (Maps browser key, if set)
+GET `/api/distance?pickup=&drop=` — auto distance calc (Google Distance Matrix)
 GET `/api/vehicles`
 POST `/api/admin/vehicles` *(admin)*
 PATCH `/api/admin/vehicles/:id` *(admin)*
 GET `/api/drivers`
 POST `/api/admin/drivers` *(admin)*
 PATCH `/api/admin/drivers/:id` *(admin)*
+
+## Deploying
+
+**Render (easiest — free tier available):**
+1. Push this folder to a GitHub repo.
+2. In Render: New → Web Service → connect the repo.
+3. Root directory: `backend`. Build command: `npm install`. Start command: `npm start`.
+4. Add environment variables under Settings → Environment (all the ones from `.env.example`: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `NOTIFY_*`/`TWILIO_*` if using SMS, `GOOGLE_MAPS_*` if using auto distance).
+5. Render gives you a public HTTPS URL automatically — no reverse proxy setup needed.
+6. ⚠️ Render's free tier has an *ephemeral filesystem* — the SQLite file (`velan-travels.db`) is wiped on every redeploy/restart. Fine for a demo; for production either upgrade to a paid instance with a persistent disk (Render → Disks), or migrate to a hosted Postgres/MySQL database.
+
+**Railway:** same idea — New Project → Deploy from GitHub → set root directory to `backend` → add the same environment variables. Railway volumes can persist the SQLite file across restarts (Settings → Volumes → mount at `/app` or wherever `velan-travels.db` resolves to).
+
+**DigitalOcean / any VPS (Ubuntu):**
+1. `git clone` the repo onto the droplet, `cd backend && npm install`.
+2. Create `.env` from `.env.example` with real values.
+3. Run it under a process manager so it survives reboots/crashes: `npm install -g pm2 && pm2 start src/server.js --name velan-travels && pm2 save && pm2 startup`.
+4. Put Nginx in front for HTTPS: point a domain at the droplet, `certbot --nginx` for a free TLS cert, and reverse-proxy port 80/443 → `localhost:4000`.
+5. Here the SQLite file lives on real disk and persists normally — just make sure you're backing up `velan-travels.db` periodically (e.g. a cron job copying it to S3/Spaces).
+
+Whichever host you pick, remember the in-memory session store note below — a restart logs every admin out, and it won't work if you ever scale to more than one server instance.
 
 ## Notes for further hardening (production)
 - Sessions are kept in-memory (`Map`) — they reset on server restart and won't work across multiple server instances. Move to a database-backed or Redis session store for production/scale.
