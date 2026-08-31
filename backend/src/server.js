@@ -19,6 +19,13 @@ db.exec(schema);
 
 // ---------- migration: add drivers.pin_hash for existing DBs created before PIN login ----------
 try { db.exec('ALTER TABLE drivers ADD COLUMN pin_hash TEXT'); } catch (e) { /* column already exists */ }
+// ---------- migration: add drivers.pin_is_default for existing DBs ----------
+try { db.exec('ALTER TABLE drivers ADD COLUMN pin_is_default INTEGER NOT NULL DEFAULT 0'); } catch (e) { /* column already exists */ }
+// ---------- migration: sessions table (DB-backed, replaces the old in-memory Map) ----------
+db.exec(`CREATE TABLE IF NOT EXISTS sessions (
+  token TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL
+)`);
+db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()); // sweep stale sessions on boot
 
 // ---------- password hashing (scrypt, no extra native deps) ----------
 function hashPassword(password) {
@@ -46,8 +53,8 @@ function isValidPin(p) { return /^\d{4,6}$/.test(String(p || '').trim()); }
 const driversMissingPin = db.prepare('SELECT id, mobile FROM drivers WHERE pin_hash IS NULL').all();
 for (const d of driversMissingPin) {
   const defaultPin = String(d.mobile).slice(-4);
-  db.prepare('UPDATE drivers SET pin_hash=? WHERE id=?').run(hashPin(defaultPin), d.id);
-  console.log(`Driver #${d.id} (${d.mobile}) had no PIN — set default PIN "${defaultPin}" (last 4 digits of mobile). Ask them to change it.`);
+  db.prepare('UPDATE drivers SET pin_hash=?, pin_is_default=1 WHERE id=?').run(hashPin(defaultPin), d.id);
+  console.log(`Driver #${d.id} (${d.mobile}) had no PIN — set default PIN "${defaultPin}" (last 4 digits of mobile). They'll be asked to change it on next login.`);
 }
 
 // ---------- seed / migrate the admin account ----------
@@ -60,42 +67,79 @@ if (!existingAdmin) {
   console.log(`Seeded admin account: ${adminEmail}`);
 }
 
-// ---------- in-memory session tokens (12h expiry) ----------
-const sessions = new Map(); // token -> { email, expires }
-const driverSessions = new Map(); // token -> { driverId, expires }
+// ---------- DB-backed session tokens (12h expiry) ----------
+// Stored in SQLite instead of an in-memory Map so admin/driver logins survive
+// a server restart, and (unlike a Map) would keep working if this were ever
+// pointed at a shared DB from multiple server instances.
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const insertSession = db.prepare('INSERT INTO sessions(token,kind,subject,expires_at) VALUES(?,?,?,?)');
+const getSession = db.prepare('SELECT * FROM sessions WHERE token=?');
+const deleteSession = db.prepare('DELETE FROM sessions WHERE token=?');
 function issueToken(email) {
   const token = crypto.randomBytes(24).toString('hex');
-  sessions.set(token, { email, expires: Date.now() + SESSION_TTL_MS });
+  insertSession.run(token, 'admin', email, Date.now() + SESSION_TTL_MS);
   return token;
 }
 function issueDriverToken(driverId) {
   const token = crypto.randomBytes(24).toString('hex');
-  driverSessions.set(token, { driverId, expires: Date.now() + SESSION_TTL_MS });
+  insertSession.run(token, 'driver', String(driverId), Date.now() + SESSION_TTL_MS);
   return token;
 }
 function adminOnly(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  const session = token && sessions.get(token);
-  if (!session || session.expires < Date.now()) {
-    if (token) sessions.delete(token);
+  const session = token && getSession.get(token);
+  if (!session || session.kind !== 'admin' || session.expires_at < Date.now()) {
+    if (token) deleteSession.run(token);
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  req.adminEmail = session.email;
+  req.adminEmail = session.subject;
   next();
 }
 function driverOnly(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  const session = token && driverSessions.get(token);
-  if (!session || session.expires < Date.now()) {
-    if (token) driverSessions.delete(token);
+  const session = token && getSession.get(token);
+  if (!session || session.kind !== 'driver' || session.expires_at < Date.now()) {
+    if (token) deleteSession.run(token);
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  req.driverId = session.driverId;
+  req.driverId = Number(session.subject);
   next();
 }
+
+// ---------- login rate limiting (in-memory, per IP+identifier sliding window) ----------
+// Intentionally in-memory even though sessions are now DB-backed: a reset on
+// restart is fine for a rate limiter (worst case someone gets a few extra
+// tries right after a deploy), and it avoids a DB write on every keystroke
+// of a login attempt. For multi-instance deployments, swap this for a
+// Redis-backed limiter.
+const loginAttempts = new Map(); // key -> [timestamps]
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 8;
+function rateLimitLogin(keyFn) {
+  return (req, res, next) => {
+    const key = keyFn(req);
+    const now = Date.now();
+    const attempts = (loginAttempts.get(key) || []).filter(t => now - t < LOGIN_WINDOW_MS);
+    if (attempts.length >= LOGIN_MAX_ATTEMPTS) {
+      const retryAfterSec = Math.ceil((LOGIN_WINDOW_MS - (now - attempts[0])) / 1000);
+      res.set('Retry-After', String(retryAfterSec));
+      return res.status(429).json({ error: 'Too many login attempts. Please try again later.' });
+    }
+    attempts.push(now);
+    loginAttempts.set(key, attempts);
+    next();
+  };
+}
+// Periodic cleanup so loginAttempts doesn't grow unbounded over a long uptime.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, attempts] of loginAttempts) {
+    const fresh = attempts.filter(t => now - t < LOGIN_WINDOW_MS);
+    if (fresh.length) loginAttempts.set(key, fresh); else loginAttempts.delete(key);
+  }
+}, 5 * 60 * 1000).unref();
 
 app.use(cors());
 app.use(express.json());
@@ -138,7 +182,7 @@ function findDriverConflict(driverId, date, time, excludeBookingRowId = null) {
 }
 
 // ---------- auth ----------
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', rateLimitLogin(req => 'admin:' + (req.ip || '') + ':' + (req.body?.email || '')), (req, res) => {
   const { email, password } = req.body || {};
   const admin = db.prepare('SELECT * FROM admins WHERE email=?').get(email);
   if (!admin || !verifyPassword(password || '', admin.password_hash))
@@ -147,19 +191,32 @@ app.post('/api/auth/login', (req, res) => {
 });
 app.post('/api/auth/logout', adminOnly, (req, res) => {
   const header = req.headers.authorization || '';
-  sessions.delete(header.slice(7));
+  deleteSession.run(header.slice(7));
   res.json({ ok: true });
 });
 
 // ---------- driver auth (mobile number + PIN) ----------
-app.post('/api/driver/login', (req, res) => {
+app.post('/api/driver/login', rateLimitLogin(req => 'driver:' + (req.ip || '') + ':' + (req.body?.mobile || '')), (req, res) => {
   const mobile = String((req.body || {}).mobile || '').trim();
   const pin = String((req.body || {}).pin || '').trim();
   const driver = db.prepare('SELECT * FROM drivers WHERE mobile=?').get(mobile);
   // Same error for "no such driver" and "wrong PIN" so mobile numbers can't be enumerated.
   if (!driver || !driver.pin_hash || !verifyPin(pin, driver.pin_hash))
     return res.status(401).json({ error: 'Invalid mobile number or PIN' });
-  res.json({ token: issueDriverToken(driver.id), driver: { id: driver.id, name: driver.name } });
+  res.json({
+    token: issueDriverToken(driver.id),
+    driver: { id: driver.id, name: driver.name },
+    pinIsDefault: !!driver.pin_is_default,
+  });
+});
+
+// ---------- driver: change own PIN (required if pinIsDefault came back true on login) ----------
+app.patch('/api/driver/pin', driverOnly, (req, res) => {
+  const { newPin } = req.body || {};
+  if (!isValidPin(newPin)) return res.status(400).json({ error: 'PIN must be 4-6 digits' });
+  db.prepare('UPDATE drivers SET pin_hash=?, pin_is_default=0, updated_at=CURRENT_TIMESTAMP WHERE id=?')
+    .run(hashPin(String(newPin).trim()), req.driverId);
+  res.json({ ok: true });
 });
 
 // ---------- driver: my assigned trips ----------
@@ -351,28 +408,34 @@ app.get('/api/admin/dashboard', adminOnly, (req, res) => {
 // ---------- admin: bookings (with filters) ----------
 // Capped at MAX_PAGE_SIZE per request so this can't return an unbounded result
 // set as bookings pile up. Pass ?limit=&offset= to page through more.
+// Default page size is smaller (DEFAULT_PAGE_SIZE) so the admin UI's
+// pagination controls have something to page through; ?limit= can still
+// request up to MAX_PAGE_SIZE at once.
 const MAX_PAGE_SIZE = 500;
+const DEFAULT_PAGE_SIZE = 50;
 app.get('/api/admin/bookings', adminOnly, (req, res) => {
   const { status, q, date } = req.query;
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || MAX_PAGE_SIZE, 1), MAX_PAGE_SIZE);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-  let sql = `
+  let where = ' WHERE 1=1';
+  const params = [];
+  if (status) { where += ' AND b.status=?'; params.push(status); }
+  if (date) { where += ' AND b.journey_date=?'; params.push(date); }
+  if (q) {
+    where += ' AND (b.booking_id LIKE ? OR c.name LIKE ? OR c.mobile LIKE ?)';
+    const like = `%${q}%`; params.push(like, like, like);
+  }
+  const total = db.prepare(`SELECT COUNT(*) c FROM bookings b JOIN customers c ON c.id=b.customer_id${where}`).get(...params).c;
+  const sql = `
     SELECT b.*, c.name customer_name, c.mobile, v.name vehicle_name,
            d.name driver_name
     FROM bookings b JOIN customers c ON c.id=b.customer_id
     LEFT JOIN vehicles v ON v.id=b.vehicle_id
     LEFT JOIN drivers d ON d.id=b.driver_id
-    WHERE 1=1`;
-  const params = [];
-  if (status) { sql += ' AND b.status=?'; params.push(status); }
-  if (date) { sql += ' AND b.journey_date=?'; params.push(date); }
-  if (q) {
-    sql += ' AND (b.booking_id LIKE ? OR c.name LIKE ? OR c.mobile LIKE ?)';
-    const like = `%${q}%`; params.push(like, like, like);
-  }
-  sql += ' ORDER BY b.created_at DESC LIMIT ? OFFSET ?';
-  params.push(limit, offset);
-  res.json(db.prepare(sql).all(...params));
+    ${where} ORDER BY b.created_at DESC LIMIT ? OFFSET ?`;
+  res.set('X-Total-Count', String(total));
+  res.set('Access-Control-Expose-Headers', 'X-Total-Count');
+  res.json(db.prepare(sql).all(...params, limit, offset));
 });
 
 // ---------- admin: export bookings as CSV ----------
@@ -462,21 +525,23 @@ app.get('/api/admin/analytics', adminOnly, (req, res) => {
 // ---------- admin: customers (with trip counts & total spend) ----------
 app.get('/api/admin/customers', adminOnly, (req, res) => {
   const { q } = req.query;
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || MAX_PAGE_SIZE, 1), MAX_PAGE_SIZE);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || DEFAULT_PAGE_SIZE, 1), MAX_PAGE_SIZE);
   const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
-  let sql = `
+  let where = ' WHERE 1=1';
+  const params = [];
+  if (q) { where += ' AND (c.name LIKE ? OR c.mobile LIKE ?)'; const like = `%${q}%`; params.push(like, like); }
+  const total = db.prepare(`SELECT COUNT(*) c FROM customers c${where}`).get(...params).c;
+  const sql = `
     SELECT c.id, c.name, c.mobile, c.created_at,
            COUNT(b.id) AS total_trips,
            COALESCE(SUM(CASE WHEN b.status='COMPLETED' THEN b.estimated_fare ELSE 0 END),0) AS total_spend,
            MAX(b.created_at) AS last_booking
     FROM customers c
     LEFT JOIN bookings b ON b.customer_id = c.id
-    WHERE 1=1`;
-  const params = [];
-  if (q) { sql += ' AND (c.name LIKE ? OR c.mobile LIKE ?)'; const like = `%${q}%`; params.push(like, like); }
-  sql += ' GROUP BY c.id ORDER BY last_booking DESC LIMIT ? OFFSET ?';
-  params.push(limit, offset);
-  res.json(db.prepare(sql).all(...params));
+    ${where} GROUP BY c.id ORDER BY last_booking DESC LIMIT ? OFFSET ?`;
+  res.set('X-Total-Count', String(total));
+  res.set('Access-Control-Expose-Headers', 'X-Total-Count');
+  res.json(db.prepare(sql).all(...params, limit, offset));
 });
 
 // ---------- admin: recent activity feed (last status/driver changes) ----------
