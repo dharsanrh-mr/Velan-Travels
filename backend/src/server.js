@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
+const { notify, bookingConfirmedMsg, statusUpdateMsg, driverAssignedCustomerMsg, tripAssignedDriverMsg } = require('./notify');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -181,6 +182,8 @@ app.patch('/api/driver/bookings/:id/status', driverOnly, (req, res) => {
   if (!nextAllowed || req.body.status !== nextAllowed)
     return res.status(400).json({ error: `Cannot move from ${row.status} to ${req.body.status}` });
   db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(nextAllowed, row.id);
+  const cust = db.prepare('SELECT mobile FROM customers WHERE id=?').get(row.customer_id);
+  if (cust) notify(cust.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: nextAllowed }));
   res.json({ ok: true, status: nextAllowed });
 });
 
@@ -240,6 +243,7 @@ app.post('/api/bookings', (req, res) => {
       if (attempt === 4) throw e;
     }
   }
+  notify(b.mobile, bookingConfirmedMsg({ bookingId, pickup: b.pickup, drop: b.drop, date: b.date, time: b.time, fare: estFare }));
   res.status(201).json({ bookingId, estimatedFare: estFare });
 });
 
@@ -307,6 +311,10 @@ app.patch('/api/bookings/:bookingId/cancel', (req, res) => {
     return res.status(400).json({ error: `Booking is ${row.status.replaceAll('_', ' ')} and cannot be cancelled` });
 
   db.prepare(`UPDATE bookings SET status='CANCELLED',updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(row.id);
+  if (row.driver_id) {
+    const driver = db.prepare('SELECT mobile FROM drivers WHERE id=?').get(row.driver_id);
+    if (driver) notify(driver.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: 'CANCELLED' }));
+  }
   res.json({ ok: true });
 });
 
@@ -478,6 +486,10 @@ app.patch('/api/admin/bookings/:id/status', adminOnly, (req, res) => {
   if (!allowed.includes(req.body.status)) return res.status(400).json({ error: 'Invalid status' });
   db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
     .run(req.body.status, req.params.id);
+  const row = db.prepare(`
+    SELECT b.booking_id, c.mobile FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.id=?
+  `).get(req.params.id);
+  if (row) notify(row.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: req.body.status }));
   res.json({ ok: true });
 });
 
@@ -494,6 +506,20 @@ app.patch('/api/admin/bookings/:id/driver', adminOnly, (req, res) => {
   }
   db.prepare("UPDATE bookings SET driver_id=?,status='DRIVER_ASSIGNED',updated_at=CURRENT_TIMESTAMP WHERE id=?")
     .run(driverId, req.params.id);
+  if (driverId) {
+    const driver = db.prepare('SELECT name, mobile FROM drivers WHERE id=?').get(driverId);
+    const customer = db.prepare('SELECT name, mobile FROM customers WHERE id=?').get(booking.customer_id);
+    if (driver) {
+      notify(driver.mobile, tripAssignedDriverMsg({
+        bookingId: booking.booking_id, pickup: booking.pickup_location, drop: booking.drop_location,
+        date: booking.journey_date, time: booking.journey_time,
+        customerName: customer ? customer.name : '', customerMobile: customer ? customer.mobile : '',
+      }));
+      if (customer) {
+        notify(customer.mobile, driverAssignedCustomerMsg({ bookingId: booking.booking_id, driverName: driver.name, driverMobile: driver.mobile }));
+      }
+    }
+  }
   res.json({ ok: true });
 });
 
