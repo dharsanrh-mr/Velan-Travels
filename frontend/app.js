@@ -367,6 +367,7 @@ let wz = {};      // pickup, drop, date, time, distanceKm, vehicleId, name, mobi
 let wzStep = 1;
 let wzResult = null;
 let wzVehicles = [];
+let wzPeakMultiplier = 1; // fetched from /api/pricing so the wizard's estimate matches what POST /api/bookings will actually charge
 
 const WZ_STEPS = [
   { n: 1, label: 'Route & Date' },
@@ -497,11 +498,15 @@ async function renderWizardStep2() {
 function estimateFare() {
   const v = wzVehicles.find(x => String(x.id) === String(wz.vehicleId));
   if (!v || !wz.distanceKm) return null;
-  return Math.round(Number(v.base_fare) + Number(wz.distanceKm) * Number(v.rate_per_km));
+  const baseFare = Number(v.base_fare) + Number(wz.distanceKm) * Number(v.rate_per_km);
+  return Math.round(Math.round(baseFare) * (wzPeakMultiplier || 1));
 }
 
 async function renderWizardStep3() {
   if (!wzVehicles.length) wzVehicles = await api('/api/vehicles');
+  // Fetch the live peak-pricing multiplier so the estimate shown here matches
+  // what POST /api/bookings will actually charge.
+  try { wzPeakMultiplier = (await api('/api/pricing')).peakMultiplier || 1; } catch (e) { wzPeakMultiplier = 1; }
   const v = wzVehicles.find(x => String(x.id) === String(wz.vehicleId));
   const fare = estimateFare();
   shell(`<section class="page">
@@ -1214,11 +1219,11 @@ async function bookings(filters = {}, offset = 0) {
     <td>${esc(b.journey_date)}<br><span style="color:var(--muted)">${esc(b.journey_time)}</span></td>
     <td>${esc(b.vehicle_name || '-')}</td>
     <td>${money(b.estimated_fare)}</td>
-    <td><select onchange="assignDriver(${b.id},this.value)">
+    <td><select onchange="assignDriver(${b.id},this.value,this)">
       <option value="">Unassigned</option>
       ${ds.map(d => `<option value="${d.id}" ${d.id === b.driver_id ? 'selected' : ''}>${esc(d.name)}</option>`).join('')}
     </select></td>
-    <td><select onchange="changeStatus(${b.id},this.value)">
+    <td><select onchange="changeStatus(${b.id},this.value,this)">
       ${statuses.map(s => `<option ${s === b.status ? 'selected' : ''}>${s}</option>`).join('')}
     </select></td>
     <td><button class="icon-btn" title="View" onclick="showBookingDetail(${b.id})">${ICON.eye}</button></td>
@@ -1239,11 +1244,35 @@ async function bookings(filters = {}, offset = 0) {
   if (prevBtn) prevBtn.onclick = () => bookings(filters, Number(prevBtn.dataset.offset));
   if (nextBtn) nextBtn.onclick = () => bookings(filters, Number(nextBtn.dataset.offset));
 }
-async function changeStatus(id, status) {
-  await api('/api/admin/bookings/' + id + '/status', { method: 'PATCH', body: JSON.stringify({ status }) });
+function currentBookingsView() {
+  const form = document.getElementById('filterForm');
+  const filters = form ? Object.fromEntries(new FormData(form)) : {};
+  Object.keys(filters).forEach(k => { if (!filters[k]) delete filters[k]; });
+  const nextBtn = document.getElementById('bookingsNext');
+  const prevBtn = document.getElementById('bookingsPrev');
+  const offset = nextBtn ? Number(nextBtn.dataset.offset) - PAGE_SIZE
+    : (prevBtn ? Number(prevBtn.dataset.offset) + PAGE_SIZE : 0);
+  return { filters, offset: Number.isFinite(offset) && offset >= 0 ? offset : 0 };
 }
-async function assignDriver(id, driverId) {
-  await api('/api/admin/bookings/' + id + '/driver', { method: 'PATCH', body: JSON.stringify({ driverId: driverId || null }) });
+async function changeStatus(id, status, el) {
+  try {
+    await api('/api/admin/bookings/' + id + '/status', { method: 'PATCH', body: JSON.stringify({ status }) });
+    const { filters, offset } = currentBookingsView();
+    bookings(filters, offset);
+  } catch (x) {
+    alert(x.message);
+    if (el) el.value = bookingCache[id] ? bookingCache[id].status : el.value;
+  }
+}
+async function assignDriver(id, driverId, el) {
+  try {
+    await api('/api/admin/bookings/' + id + '/driver', { method: 'PATCH', body: JSON.stringify({ driverId: driverId || null }) });
+    const { filters, offset } = currentBookingsView();
+    bookings(filters, offset);
+  } catch (x) {
+    alert(x.message);
+    if (el) el.value = bookingCache[id] ? (bookingCache[id].driver_id || '') : el.value;
+  }
 }
 
 // ---------------- Admin: Vehicles ----------------
@@ -1267,7 +1296,7 @@ async function vehicles(editId = null) {
         <option value="true" ${!editing || editing.ac ? 'selected' : ''}>AC</option>
         <option value="false" ${editing && !editing.ac ? 'selected' : ''}>Non-AC</option>
       </select></div>
-      ${editing ? `<div class="field"><label>Status</label><select name="status"><option ${editing.status === 'AVAILABLE' ? 'selected' : ''}>AVAILABLE</option><option ${editing.status === 'UNAVAILABLE' ? 'selected' : ''}>UNAVAILABLE</option></select></div>` : ''}
+      ${editing ? `<div class="field"><label>Status</label><select name="status"><option ${editing.status === 'AVAILABLE' ? 'selected' : ''}>AVAILABLE</option><option ${editing.status === 'UNAVAILABLE' ? 'selected' : ''}>UNAVAILABLE</option><option ${editing.status === 'MAINTENANCE' ? 'selected' : ''}>MAINTENANCE</option></select></div>` : ''}
       <div style="display:flex;gap:10px;align-items:flex-end">
         <button class="btn">${editing ? 'Save Changes' : 'Add Vehicle'}</button>
         ${editing ? '<button type="button" class="btn secondary" id="cancelEdit">Cancel</button>' : ''}
@@ -1278,7 +1307,7 @@ async function vehicles(editId = null) {
   <div class="grid" style="padding:0;margin-top:18px">${vs.map(v => `<div class="card">
     <div style="display:flex;justify-content:space-between;align-items:flex-start">
       <div class="v-icon" style="margin-bottom:8px">${ICON.car}</div>
-      <span class="status-pill status-${v.status === 'AVAILABLE' ? 'COMPLETED' : 'CANCELLED'}">${v.status}</span>
+      <span class="status-pill status-${v.status === 'AVAILABLE' ? 'COMPLETED' : v.status === 'MAINTENANCE' ? 'PENDING' : 'CANCELLED'}">${v.status}</span>
     </div>
     <h2>${esc(v.name)}</h2><p style="color:var(--muted)">${esc(v.vehicle_number)}</p>
     <p>${v.seating_capacity} Seats · ${v.ac ? 'AC' : 'Non-AC'} · ${esc(v.fuel_type || 'Diesel')}</p>
@@ -1507,13 +1536,9 @@ async function customers(filters = {}, offset = 0) {
 async function settingsPage() {
   loading(true);
   adminShell('settings', 'Settings', `
-  <div class="card" style="max-width:480px;margin-bottom:16px">
-    <h2>Peak Pricing</h2>
-    <p style="color:var(--muted);font-size:13px">Set a temporary fare multiplier from 1× to 3×. The booking API applies it automatically.</p>
-    <form id="pricingForm" style="display:flex;gap:10px;align-items:end;margin-top:12px"><div class="field" style="flex:1"><label>Multiplier</label><input id="peakMultiplier" name="peakMultiplier" type="number" min="1" max="3" step="0.1" value="1"></div><button class="btn">Save</button></form><p id="pricingMsg" class="error"></p>
-  </div>
   <div class="card" style="max-width:480px">
     <h2>Change Password</h2>
+    <p style="color:var(--muted);font-size:13px">Peak pricing has moved to the Operations Center.</p>
     <form id="pwForm" style="display:flex;flex-direction:column;gap:14px;margin-top:12px">
       <div class="field"><label>Current Password</label><input type="password" name="currentPassword" required></div>
       <div class="field"><label>New Password</label><input type="password" name="newPassword" minlength="6" required></div>
@@ -1521,8 +1546,6 @@ async function settingsPage() {
       <p id="pwMsg" class="error"></p>
     </form>
   </div>`);
-  api('/api/pricing').then(r=>{document.getElementById('peakMultiplier').value=r.peakMultiplier||1;}).catch(()=>{});
-  document.getElementById('pricingForm').onsubmit=async e=>{e.preventDefault();try{const r=await api('/api/admin/pricing',{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});document.getElementById('pricingMsg').style.color='var(--green)';document.getElementById('pricingMsg').textContent=`Saved at ${r.peakMultiplier}×`;toast('Peak pricing updated');}catch(x){document.getElementById('pricingMsg').textContent=x.message;}};
   document.getElementById('pwForm').onsubmit = async e => {
     e.preventDefault();
     const msgEl = document.getElementById('pwMsg');
@@ -1570,7 +1593,7 @@ async function operations() {
     const bell=document.getElementById('adminBell'); if(bell){ bell.onclick=()=>toast(notifications.length?`${notifications.length} notification(s) need attention.`:'No new notifications.',notifications.length?'warning':''); }
     document.getElementById('peakForm').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target));await api('/api/admin/settings/peak',{method:'PATCH',body:JSON.stringify({enabled:!!e.target.enabled.checked,multiplier:Number(f.multiplier)})});toast('Peak pricing settings saved.');operations();};
     document.getElementById('maintForm').onsubmit=async e=>{e.preventDefault();await api('/api/admin/maintenance',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Maintenance record added.');operations();};
-    document.getElementById('couponForm').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target)); await api('/api/admin/promos',{method:'POST',body:JSON.stringify({code:f.code,discountType:f.type,discountValue:f.value,minFare:f.minFare,maxDiscount:f.maxDiscount,expiresAt:f.expiresAt})});toast('Coupon created.');e.target.reset();};
+    document.getElementById('couponForm').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target)); await api('/api/admin/coupons',{method:'POST',body:JSON.stringify({code:f.code,type:f.type,value:f.value,minFare:f.minFare,maxDiscount:f.maxDiscount,usageLimit:f.usageLimit,expiresAt:f.expiresAt})});toast('Coupon created.');e.target.reset();};
     document.getElementById('backupBtn').onclick=async()=>{const r=await fetch('/api/admin/backup',{headers:{Authorization:'Bearer '+token}});if(!r.ok)return toast('Backup failed','error');const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='velan-travels-backup-'+todayStr()+'.db';a.click();URL.revokeObjectURL(u);toast('Database backup prepared.');};
     document.getElementById('exportBtn').onclick=()=>exportBookingsCsv();
   } catch(e) { toast(e.message,'error'); }
