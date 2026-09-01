@@ -19,6 +19,9 @@ const db = new Database(dbPath);
 db.pragma('foreign_keys = ON');
 const schema = fs.readFileSync(path.join(__dirname, '../../database/schema.sql'), 'utf8');
 db.exec(schema);
+// Timeline migration is included in schema.sql; this explicit CREATE keeps existing production DBs safe.
+db.exec(`CREATE TABLE IF NOT EXISTS booking_events (id INTEGER PRIMARY KEY AUTOINCREMENT, booking_id INTEGER NOT NULL, event_type TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_booking_events_booking ON booking_events(booking_id, created_at)');
 
 // ---------- migration: add drivers.pin_hash for existing DBs created before PIN login ----------
 try { db.exec('ALTER TABLE drivers ADD COLUMN pin_hash TEXT'); } catch (e) { /* column already exists */ }
@@ -390,7 +393,8 @@ app.get('/api/customer/bookings', customerOnly, (req, res) => {
     WHERE c.mobile = ?
     ORDER BY b.created_at DESC
   `).all(req.customerMobile);
-  res.json(rows);
+  const eventStmt = db.prepare('SELECT event_type, message, created_at FROM booking_events WHERE booking_id=? ORDER BY created_at ASC, id ASC');
+  res.json(rows.map(r => ({ ...r, timeline: eventStmt.all(r.id) })));
 });
 
 // ---------- public: vehicles / drivers (read-only) ----------
@@ -425,6 +429,15 @@ app.get('/api/drivers', (req, res) => {
     FROM drivers d LEFT JOIN vehicles v ON v.id=d.vehicle_id ORDER BY d.name
   `).all());
 });
+
+// ---------- booking timeline ----------
+const addBookingEvent = db.prepare(
+  'INSERT INTO booking_events(booking_id,event_type,message) VALUES(?,?,?)'
+);
+function recordBookingEvent(bookingDbId, eventType, message) {
+  try { addBookingEvent.run(bookingDbId, eventType, message); }
+  catch (e) { console.error('[timeline]', e.message); }
+}
 
 // ---------- bookings ----------
 app.post('/api/bookings', publicRateLimit, (req, res) => {
@@ -469,6 +482,8 @@ app.post('/api/bookings', publicRateLimit, (req, res) => {
       if (attempt === 4) throw e;
     }
   }
+  const created = db.prepare('SELECT id FROM bookings WHERE booking_id=?').get(bookingId);
+  if (created) recordBookingEvent(created.id, 'BOOKING_CREATED', 'Booking received');
   notify(b.mobile, bookingConfirmedMsg({ bookingId, pickup: b.pickup, drop: b.drop, date: b.date, time: b.time, fare: estFare }));
   res.status(201).json({ bookingId, estimatedFare: estFare });
 });
@@ -484,7 +499,8 @@ app.get('/api/bookings/:bookingId', (req, res) => {
     WHERE b.booking_id=?
   `).get(req.params.bookingId);
   if (!row) return res.status(404).json({ error: 'Booking not found' });
-  res.json(row);
+  const events = db.prepare('SELECT event_type, message, created_at FROM booking_events WHERE booking_id=? ORDER BY created_at ASC, id ASC').all(row.id);
+  res.json({ ...row, timeline: events });
 });
 
 const EDITABLE_STATUSES = ['PENDING', 'CONFIRMED'];
@@ -520,6 +536,7 @@ app.patch('/api/bookings/:bookingId', (req, res) => {
   db.prepare(`UPDATE bookings SET pickup_location=?,drop_location=?,journey_date=?,journey_time=?,passengers=?,
     additional_requirements=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`)
     .run(pickup, drop, date, time, passengers, b.requirements ?? row.additional_requirements, row.id);
+  recordBookingEvent(row.id, 'BOOKING_EDITED', 'Booking details updated by customer');
   res.json({ ok: true });
 });
 
@@ -537,6 +554,7 @@ app.patch('/api/bookings/:bookingId/cancel', (req, res) => {
     return res.status(400).json({ error: `Booking is ${row.status.replaceAll('_', ' ')} and cannot be cancelled` });
 
   db.prepare(`UPDATE bookings SET status='CANCELLED',updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(row.id);
+  recordBookingEvent(row.id, 'CANCELLED', 'Booking cancelled by customer');
   if (row.driver_id) {
     const driver = db.prepare('SELECT mobile FROM drivers WHERE id=?').get(row.driver_id);
     if (driver) notify(driver.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: 'CANCELLED' }));
@@ -550,6 +568,10 @@ app.get('/api/admin/dashboard', adminOnly, (req, res) => {
   const counts = {};
   for (const s of statuses) counts[s] = db.prepare('SELECT COUNT(*) c FROM bookings WHERE status=?').get(s).c;
   counts.TOTAL = db.prepare('SELECT COUNT(*) c FROM bookings').get().c;
+  const today = new Date().toISOString().slice(0, 10);
+  counts.TODAY = db.prepare('SELECT COUNT(*) c FROM bookings WHERE journey_date=?').get(today).c;
+  counts.TODAY_PENDING = db.prepare("SELECT COUNT(*) c FROM bookings WHERE journey_date=? AND status IN ('PENDING','CONFIRMED','DRIVER_ASSIGNED')").get(today).c;
+  counts.TODAY_REVENUE = db.prepare("SELECT COALESCE(SUM(estimated_fare),0) c FROM bookings WHERE journey_date=? AND status='COMPLETED'").get(today).c;
   res.json(counts);
 });
 
@@ -693,6 +715,15 @@ app.get('/api/admin/customers', adminOnly, (req, res) => {
 });
 
 // ---------- admin: recent activity feed (last status/driver changes) ----------
+app.get('/api/admin/notifications', adminOnly, (req, res) => {
+  const rows = db.prepare(`
+    SELECT e.id, e.event_type, e.message, e.created_at, b.booking_id
+    FROM booking_events e JOIN bookings b ON b.id=e.booking_id
+    ORDER BY e.created_at DESC, e.id DESC LIMIT 12
+  `).all();
+  res.json(rows);
+});
+
 app.get('/api/admin/activity', adminOnly, (req, res) => {
   const rows = db.prepare(`
     SELECT b.booking_id, b.status, b.pickup_location, b.drop_location, b.updated_at, b.created_at
@@ -723,6 +754,7 @@ app.patch('/api/admin/bookings/:id/status', adminOnly, (req, res) => {
   if (!allowed.includes(req.body.status)) return res.status(400).json({ error: 'Invalid status' });
   db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
     .run(req.body.status, req.params.id);
+  recordBookingEvent(req.params.id, 'STATUS_CHANGED', `Status changed to ${req.body.status.replaceAll('_', ' ')}`);
   const row = db.prepare(`
     SELECT b.booking_id, c.mobile FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.id=?
   `).get(req.params.id);
@@ -743,6 +775,8 @@ app.patch('/api/admin/bookings/:id/driver', adminOnly, (req, res) => {
   }
   db.prepare("UPDATE bookings SET driver_id=?,status='DRIVER_ASSIGNED',updated_at=CURRENT_TIMESTAMP WHERE id=?")
     .run(driverId, req.params.id);
+  recordBookingEvent(req.params.id, driverId ? 'DRIVER_ASSIGNED' : 'DRIVER_UNASSIGNED',
+    driverId ? 'Driver assigned' : 'Driver assignment removed');
   if (driverId) {
     const driver = db.prepare('SELECT name, mobile FROM drivers WHERE id=?').get(driverId);
     const customer = db.prepare('SELECT name, mobile FROM customers WHERE id=?').get(booking.customer_id);
