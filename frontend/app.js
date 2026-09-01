@@ -212,31 +212,40 @@ function scrollToId(id) {
 // ---------------- Home ----------------
 function home() {
   shell(`
-  <section class="hero" id="topSection">
-    <div class="hero-inner">
-      <div class="hero-text">
-        <p class="eyebrow">SAFE • RELIABLE • ALWAYS WITH YOU</p>
-        <h1>Travel with <span class="accent">Velan</span></h1>
-        <p class="lead">Safe, reliable and always with you. Professional local and outstation travel services for every journey.</p>
-        <a class="btn" href="#book" style="margin-top:8px">Book Your Trip</a>
-        <div class="hero-badges">
-          <div class="hero-badge"><span class="ic">${ICON.shield}</span>Safe</div>
-          <div class="hero-badge"><span class="ic">${ICON.seat}</span>Comfort</div>
-          <div class="hero-badge"><span class="ic">${ICON.clock}</span>On Time</div>
-          <div class="hero-badge"><span class="ic">${ICON.heart}</span>Trust</div>
+  <section class="hero hero-premium" id="topSection">
+    <div class="hero-overlay"></div>
+    <div class="hero-content">
+      <div class="hero-copy">
+        <span class="hero-kicker">PREMIUM TRAVEL • LOCAL & OUTSTATION</span>
+        <h1>Your journey,<br><span>our responsibility.</span></h1>
+        <p>Safe, comfortable and on-time travel with professionally maintained vehicles and trusted drivers.</p>
+        <div class="hero-actions">
+          <a class="btn hero-primary" href="#book">Book Your Trip <span>→</span></a>
+          <a class="hero-call" href="tel:+919655213027">${ICON.phone} <span>+91 96552 13027</span></a>
+        </div>
+        <div class="hero-badges hero-badges-premium">
+          <div class="hero-badge"><span class="ic">${ICON.shield}</span><span>Safe</span></div>
+          <div class="hero-badge"><span class="ic">${ICON.seat}</span><span>Comfort</span></div>
+          <div class="hero-badge"><span class="ic">${ICON.clock}</span><span>On Time</span></div>
+          <div class="hero-badge"><span class="ic">${ICON.heart}</span><span>Trusted</span></div>
         </div>
       </div>
-      <div class="hero-image"><svg viewBox="0 0 500 300" width="100%" height="260" xmlns="http://www.w3.org/2000/svg">
-        <rect width="500" height="300" fill="#dcebe1"/>
-        <path d="M0 220 Q250 170 500 220 L500 300 L0 300 Z" fill="#cfe6d8"/>
-        <g transform="translate(120,130)" fill="none" stroke="#1b4332" stroke-width="6">
-          <path d="M0 70 L20 20 A20 20 0 0 1 38 10 L200 10 A20 20 0 0 1 220 25 L240 70"/>
-          <rect x="-5" y="70" width="255" height="45" rx="12"/>
-          <circle cx="45" cy="115" r="16" fill="#0f2c20" stroke="none"/>
-          <circle cx="200" cy="115" r="16" fill="#0f2c20" stroke="none"/>
-        </g>
-      </svg></div>
+
+      <div class="hero-booking card">
+        <div class="booking-badge">QUICK BOOKING</div>
+        <h2>Plan your next trip</h2>
+        <p class="booking-sub">Get started in a few simple steps.</p>
+        <form id="qbf" class="field-grid" style="margin-top:16px">
+          <div class="field"><label>Pickup Location</label><input name="pickup" placeholder="Where are you starting?" required></div>
+          <div class="field"><label>Drop Location</label><input name="drop" placeholder="Where are you going?" required></div>
+          <div class="field"><label>Date</label><input type="date" name="date" min="${todayStr()}" required></div>
+          <div class="field"><label>Time</label><input type="time" name="time" required></div>
+        </form>
+        <button form="qbf" class="btn block hero-book-btn">Search Available Vehicles <span>→</span></button>
+        <div class="booking-note">✓ Instant enquiry &nbsp; • &nbsp; ✓ No hidden charges</div>
+      </div>
     </div>
+    <div class="hero-bottom-wave"></div>
   </section>
 
   <div class="two-col">
