@@ -109,6 +109,28 @@ const driverApi = async (url, opt = {}) => {
   return d;
 };
 
+// ---------------- Customer session (mobile + OTP, separate from admin/driver) ----------------
+// Persisted (unlike the driver token) so a repeat customer isn't asked to
+// OTP-login again every time they close the browser.
+let customerToken = localStorage.getItem('vt_customer_token') || '';
+let customerMobile = localStorage.getItem('vt_customer_mobile') || '';
+let customerName = localStorage.getItem('vt_customer_name') || '';
+const customerApi = async (url, opt = {}) => {
+  opt.headers = { ...(opt.headers || {}), 'Content-Type': 'application/json' };
+  if (customerToken) opt.headers.Authorization = 'Bearer ' + customerToken;
+  const r = await fetch(url, opt);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw Error(d.error || 'Request failed');
+  return d;
+};
+function customerLogout() {
+  customerApi('/api/customer/logout', { method: 'POST' }).catch(() => {});
+  customerToken = ''; customerMobile = ''; customerName = '';
+  localStorage.removeItem('vt_customer_token');
+  localStorage.removeItem('vt_customer_mobile');
+  localStorage.removeItem('vt_customer_name');
+}
+
 // ---------------- Admin: CSV export ----------------
 async function exportBookingsCsv(filters = {}) {
   const qs = new URLSearchParams(filters).toString();
@@ -159,7 +181,7 @@ function shell(content, { admin = false, activeNav = '' } = {}) {
   <footer>
     <div class="wrap" style="text-align:left;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:20px;padding-bottom:16px">
       <div><b style="color:#fff">VELAN TRAVELS</b><p style="margin-top:8px;font-size:12.5px">Safe, reliable and always with you — for every journey, big or small.</p></div>
-      <div><b style="color:#fff">Customers</b><p style="margin-top:8px"><a href="#book" style="display:block;padding:3px 0">Book a Trip</a><a href="#status" style="display:block;padding:3px 0">Check Booking Status</a></p></div>
+      <div><b style="color:#fff">Customers</b><p style="margin-top:8px"><a href="#book" style="display:block;padding:3px 0">Book a Trip</a><a href="#status" style="display:block;padding:3px 0">Check Booking Status</a><a href="#my-bookings" style="display:block;padding:3px 0">My Bookings</a></p></div>
       <div><b style="color:#fff">Partners</b><p style="margin-top:8px"><a href="#driver" style="display:block;padding:3px 0">Driver Login</a><a href="#admin" style="display:block;padding:3px 0">Admin Login</a></p></div>
       <div><b style="color:#fff">Contact</b><p style="margin-top:8px;font-size:12.5px">+91 98765 43210<br>info@velantravels.com</p></div>
     </div>
@@ -499,12 +521,17 @@ function renderWizardStep4() {
 const EDITABLE_STATUSES = ['PENDING', 'CONFIRMED'];
 const CANCELLABLE_STATUSES = ['PENDING', 'CONFIRMED', 'DRIVER_ASSIGNED'];
 
+// Set by myBookings() when the customer taps a booking from their history,
+// so status() can jump straight to that booking's card instead of making
+// them retype the Booking ID.
+let pendingStatusLookup = null;
+
 function status() {
   shell(`<section class="page narrow">
     <h1>Check Booking Status</h1>
     <p style="color:var(--muted)">Enter your Booking ID to view your trip details.</p>
     <form id="sf" class="form-inline" style="margin-top:14px">
-      <input name="id" placeholder="e.g. VT8A24F1C" style="flex:1;border:1.5px solid var(--border);border-radius:9px;padding:11px 12px" required>
+      <input name="id" placeholder="e.g. VT8A24F1C" value="${esc(pendingStatusLookup || '')}" style="flex:1;border:1.5px solid var(--border);border-radius:9px;padding:11px 12px" required>
       <button class="btn">Check</button>
     </form>
     <div id="sr" style="margin-top:20px"></div>
@@ -514,6 +541,11 @@ function status() {
     const id = new FormData(e.target).get('id').trim();
     await loadBookingCard(id);
   };
+  if (pendingStatusLookup) {
+    const id = pendingStatusLookup;
+    pendingStatusLookup = null;
+    loadBookingCard(id);
+  }
 }
 
 async function loadBookingCard(id) {
@@ -606,6 +638,130 @@ function showEditForm(r) {
       document.getElementById('eErr').textContent = x.message;
     }
   };
+}
+
+// ---------------- Customer: Login (mobile + OTP) ----------------
+function customerLogin() {
+  if (customerToken) { location.hash = 'my-bookings'; return; }
+  shell(`<section class="page narrow">
+    <h1>My Bookings</h1>
+    <p style="color:var(--muted)">Enter your mobile number to receive a one-time code and view your booking history.</p>
+    <form id="clf" class="form-inline" style="margin-top:14px">
+      <input name="mobile" placeholder="10-digit mobile number" maxlength="10" style="flex:1;border:1.5px solid var(--border);border-radius:9px;padding:11px 12px" required>
+      <button class="btn">Send OTP</button>
+    </form>
+    <div id="clArea" style="margin-top:16px"></div>
+  </section>`, { activeNav: 'my-bookings' });
+  document.getElementById('clf').onsubmit = async e => {
+    e.preventDefault();
+    const mobile = new FormData(e.target).get('mobile').trim();
+    const area = document.getElementById('clArea');
+    area.innerHTML = '<p class="loading">Sending OTP…</p>';
+    try {
+      await customerApi('/api/customer/otp/request', { method: 'POST', body: JSON.stringify({ mobile }) });
+      showOtpForm(mobile);
+    } catch (x) {
+      area.innerHTML = `<p class="error">${esc(x.message)}</p>`;
+    }
+  };
+}
+
+function showOtpForm(mobile) {
+  const area = document.getElementById('clArea');
+  area.innerHTML = `
+    <p>OTP sent to <b>${esc(mobile)}</b>. It's valid for 5 minutes.</p>
+    <form id="cvf" class="form-inline" style="margin-top:10px">
+      <input name="otp" placeholder="6-digit OTP" maxlength="6" style="flex:1;border:1.5px solid var(--border);border-radius:9px;padding:11px 12px" required>
+      <button class="btn">Verify</button>
+    </form>
+    <button type="button" class="btn secondary" id="resendBtn" style="margin-top:10px" disabled>Resend OTP (30s)</button>
+    <p id="cvErr" class="error"></p>`;
+  const resendBtn = document.getElementById('resendBtn');
+  let resendIn = 30;
+  const timer = setInterval(() => {
+    resendIn--;
+    if (resendIn <= 0) {
+      clearInterval(timer);
+      resendBtn.disabled = false;
+      resendBtn.textContent = 'Resend OTP';
+    } else {
+      resendBtn.textContent = `Resend OTP (${resendIn}s)`;
+    }
+  }, 1000);
+  resendBtn.onclick = async () => {
+    resendBtn.disabled = true;
+    const errEl = document.getElementById('cvErr');
+    try {
+      await customerApi('/api/customer/otp/request', { method: 'POST', body: JSON.stringify({ mobile }) });
+      errEl.style.color = 'var(--green)';
+      errEl.textContent = 'A new OTP has been sent.';
+    } catch (x) {
+      errEl.style.color = 'var(--danger)';
+      errEl.textContent = x.message;
+    }
+  };
+  document.getElementById('cvf').onsubmit = async e => {
+    e.preventDefault();
+    const otp = new FormData(e.target).get('otp').trim();
+    try {
+      const r = await customerApi('/api/customer/otp/verify', { method: 'POST', body: JSON.stringify({ mobile, otp }) });
+      customerToken = r.token;
+      customerMobile = r.customer.mobile;
+      customerName = r.customer.name || '';
+      localStorage.setItem('vt_customer_token', customerToken);
+      localStorage.setItem('vt_customer_mobile', customerMobile);
+      localStorage.setItem('vt_customer_name', customerName);
+      clearInterval(timer);
+      location.hash = 'my-bookings';
+    } catch (x) {
+      document.getElementById('cvErr').style.color = 'var(--danger)';
+      document.getElementById('cvErr').textContent = x.message;
+    }
+  };
+}
+
+// ---------------- Customer: My Bookings (history) ----------------
+async function myBookings() {
+  if (!customerToken) { location.hash = 'customer-login'; return; }
+  loading();
+  let rows;
+  try {
+    rows = await customerApi('/api/customer/bookings');
+  } catch (x) {
+    // Token missing/expired — send back to login rather than showing an error page.
+    customerToken = ''; customerMobile = ''; customerName = '';
+    localStorage.removeItem('vt_customer_token');
+    localStorage.removeItem('vt_customer_mobile');
+    localStorage.removeItem('vt_customer_name');
+    location.hash = 'customer-login';
+    return;
+  }
+  shell(`<section class="page">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+      <h1 style="margin:0">My Bookings${customerName ? ', ' + esc(customerName) : ''}</h1>
+      <div style="display:flex;gap:10px">
+        <a class="btn secondary" href="#book">Book a Trip</a>
+        <button type="button" class="btn secondary" id="clOut">Logout</button>
+      </div>
+    </div>
+    <p style="color:var(--muted)">${esc(customerMobile)}</p>
+    <div id="mbList" style="margin-top:18px;display:flex;flex-direction:column;gap:12px">
+      ${rows.length ? rows.map(r => `
+        <div class="card mb-item" data-id="${esc(r.booking_id)}" style="cursor:pointer">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+            <b>${esc(r.booking_id)}</b>
+            <span class="status-pill status-${r.status}">${r.status.replaceAll('_', ' ')}</span>
+          </div>
+          <p style="margin:6px 0 0;color:var(--muted)">${esc(r.pickup_location)} → ${esc(r.drop_location)}</p>
+          <p style="margin:2px 0 0;color:var(--muted);font-size:13px">${esc(r.journey_date)} · ${esc(r.journey_time)}${r.vehicle_name ? ' · ' + esc(r.vehicle_name) : ''}${r.estimated_fare ? ' · ' + money(r.estimated_fare) : ''}</p>
+        </div>`).join('')
+        : '<p style="color:var(--muted)">No bookings found for this mobile number yet.</p>'}
+    </div>
+  </section>`, { activeNav: 'my-bookings' });
+  document.getElementById('clOut').onclick = () => { customerLogout(); location.hash = ''; };
+  document.querySelectorAll('.mb-item').forEach(el => {
+    el.onclick = () => { pendingStatusLookup = el.dataset.id; location.hash = 'status'; };
+  });
 }
 
 // ---------------- Admin: Login ----------------
@@ -1205,6 +1361,8 @@ function router() {
   if (h === 'status') return status();
   if (h === 'driver') return driverPortal();
   if (h === 'admin') return login();
+  if (h === 'customer-login') return customerLogin();
+  if (h === 'my-bookings') return myBookings();
   if (h === 'dashboard') return dashboard();
   if (h === 'analytics') return analytics();
   if (h === 'customers') return customers();
