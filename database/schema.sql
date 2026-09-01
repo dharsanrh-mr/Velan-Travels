@@ -51,6 +51,18 @@ CREATE TABLE IF NOT EXISTS sessions (
   expires_at INTEGER NOT NULL  -- epoch ms
 );
 
+-- One-time-passwords for customer mobile-number login. Short-lived (5 min)
+-- and hashed at rest, same as passwords/PINs. A row is deleted as soon as
+-- it's used or superseded by a fresh request for the same mobile.
+CREATE TABLE IF NOT EXISTS otps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  mobile TEXT NOT NULL,
+  otp_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS bookings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   booking_id TEXT UNIQUE NOT NULL,
