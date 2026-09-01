@@ -95,8 +95,20 @@ function tripAssignedDriverMsg({ bookingId, pickup, drop, date, time, customerNa
     `Customer: ${customerName} (${customerMobile}).`;
 }
 
+// ---------- OTP delivery (customer login) ----------
+// Unlike notify() above, this ignores NOTIFY_CHANNEL — an OTP is on the
+// critical path of logging in (not an FYI update), so it always tries SMS
+// even if the site is configured for WhatsApp-only or notifications are off.
+// With no Twilio credentials it still just logs to the console, same as
+// every other message in this file, so login works untouched in dev.
+async function sendOtp(mobile, otp) {
+  const body = `Velan Travels: Your OTP is ${otp}. It expires in 5 minutes. Do not share this with anyone.`;
+  await sendOne('sms', mobile, body);
+}
+
 module.exports = {
   notify,
+  sendOtp,
   bookingConfirmedMsg,
   statusUpdateMsg,
   driverAssignedCustomerMsg,

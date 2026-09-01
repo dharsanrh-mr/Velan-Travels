@@ -5,7 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
-const { notify, bookingConfirmedMsg, statusUpdateMsg, driverAssignedCustomerMsg, tripAssignedDriverMsg } = require('./notify');
+const { notify, sendOtp, bookingConfirmedMsg, statusUpdateMsg, driverAssignedCustomerMsg, tripAssignedDriverMsg } = require('./notify');
 const { calcDistanceKm, mapsConfigured, GOOGLE_MAPS_BROWSER_KEY } = require('./maps');
 
 const app = express();
@@ -26,6 +26,13 @@ db.exec(`CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL
 )`);
 db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()); // sweep stale sessions on boot
+
+// ---------- migration: otps table for existing DBs created before customer login ----------
+db.exec(`CREATE TABLE IF NOT EXISTS otps (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, mobile TEXT NOT NULL, otp_hash TEXT NOT NULL,
+  expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+)`);
+db.prepare('DELETE FROM otps WHERE expires_at < ?').run(Date.now()); // sweep stale OTPs on boot
 
 // ---------- password hashing (scrypt, no extra native deps) ----------
 function hashPassword(password) {
@@ -85,6 +92,11 @@ function issueDriverToken(driverId) {
   insertSession.run(token, 'driver', String(driverId), Date.now() + SESSION_TTL_MS);
   return token;
 }
+function issueCustomerToken(mobile) {
+  const token = crypto.randomBytes(24).toString('hex');
+  insertSession.run(token, 'customer', mobile, Date.now() + SESSION_TTL_MS);
+  return token;
+}
 function adminOnly(req, res, next) {
   const header = req.headers.authorization || '';
   const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -105,6 +117,17 @@ function driverOnly(req, res, next) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
   req.driverId = Number(session.subject);
+  next();
+}
+function customerOnly(req, res, next) {
+  const header = req.headers.authorization || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+  const session = token && getSession.get(token);
+  if (!session || session.kind !== 'customer' || session.expires_at < Date.now()) {
+    if (token) deleteSession.run(token);
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  req.customerMobile = session.subject;
   next();
 }
 
@@ -243,6 +266,74 @@ app.patch('/api/driver/bookings/:id/status', driverOnly, (req, res) => {
   const cust = db.prepare('SELECT mobile FROM customers WHERE id=?').get(row.customer_id);
   if (cust) notify(cust.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: nextAllowed }));
   res.json({ ok: true, status: nextAllowed });
+});
+
+// ---------- customer auth (mobile number + OTP) ----------
+const OTP_TTL_MS = 5 * 60 * 1000;
+const OTP_MAX_ATTEMPTS = 5;
+const insertOtp = db.prepare('INSERT INTO otps(mobile,otp_hash,expires_at) VALUES(?,?,?)');
+const getLatestOtp = db.prepare('SELECT * FROM otps WHERE mobile=? ORDER BY id DESC LIMIT 1');
+const bumpOtpAttempts = db.prepare('UPDATE otps SET attempts=attempts+1 WHERE id=?');
+const deleteOtpsFor = db.prepare('DELETE FROM otps WHERE mobile=?');
+function makeOtp() {
+  // crypto.randomInt (CSPRNG) instead of Math.random, same reasoning as makeBookingId.
+  return String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+}
+
+app.post('/api/customer/otp/request',
+  rateLimitLogin(req => 'otp-req:' + (req.ip || '') + ':' + (req.body?.mobile || '')),
+  (req, res) => {
+    const mobile = String((req.body || {}).mobile || '').trim();
+    if (!isValidMobile(mobile)) return res.status(400).json({ error: 'Enter a valid 10-digit mobile number' });
+    const otp = makeOtp();
+    deleteOtpsFor.run(mobile); // any earlier unused OTP for this number is now void
+    insertOtp.run(mobile, hashPassword(otp), Date.now() + OTP_TTL_MS);
+    sendOtp(mobile, otp);
+    res.json({ ok: true });
+  });
+
+app.post('/api/customer/otp/verify',
+  rateLimitLogin(req => 'otp-verify:' + (req.ip || '') + ':' + (req.body?.mobile || '')),
+  (req, res) => {
+    const mobile = String((req.body || {}).mobile || '').trim();
+    const otp = String((req.body || {}).otp || '').trim();
+    const row = getLatestOtp.get(mobile);
+    if (!row || row.expires_at < Date.now())
+      return res.status(401).json({ error: 'OTP expired or not found. Please request a new one.' });
+    if (row.attempts >= OTP_MAX_ATTEMPTS) {
+      deleteOtpsFor.run(mobile);
+      return res.status(401).json({ error: 'Too many incorrect attempts. Please request a new OTP.' });
+    }
+    if (!verifyPassword(otp, row.otp_hash)) {
+      bumpOtpAttempts.run(row.id);
+      return res.status(401).json({ error: 'Incorrect OTP' });
+    }
+    deleteOtpsFor.run(mobile);
+    // Customer rows aren't unique-per-mobile (one is created per booking), so
+    // just pull the most recent name on file for a friendlier welcome — the
+    // booking history itself is looked up by mobile, not by a single row's id.
+    const existing = db.prepare('SELECT name FROM customers WHERE mobile=? ORDER BY id DESC LIMIT 1').get(mobile);
+    res.json({ token: issueCustomerToken(mobile), customer: { mobile, name: existing ? existing.name : '' } });
+  });
+
+app.post('/api/customer/logout', customerOnly, (req, res) => {
+  const header = req.headers.authorization || '';
+  deleteSession.run(header.slice(7));
+  res.json({ ok: true });
+});
+
+// ---------- customer: my booking history ----------
+app.get('/api/customer/bookings', customerOnly, (req, res) => {
+  const rows = db.prepare(`
+    SELECT b.*, v.name vehicle_name, v.vehicle_number, d.name driver_name, d.mobile driver_mobile
+    FROM bookings b
+    JOIN customers c ON c.id = b.customer_id
+    LEFT JOIN vehicles v ON v.id = b.vehicle_id
+    LEFT JOIN drivers d ON d.id = b.driver_id
+    WHERE c.mobile = ?
+    ORDER BY b.created_at DESC
+  `).all(req.customerMobile);
+  res.json(rows);
 });
 
 // ---------- public: vehicles / drivers (read-only) ----------
