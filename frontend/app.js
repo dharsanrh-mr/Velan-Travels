@@ -175,7 +175,7 @@ function shell(content, { admin = false, activeNav = '' } = {}) {
     <nav id="nav">${admin
       ? `<a href="#dashboard">Dashboard</a><a href="#analytics">Analytics</a><a href="#bookings">Bookings</a><a href="#vehicles">Vehicles</a><a href="#drivers">Drivers</a><a href="#logout">Logout</a>`
       : `<a href="#" data-scroll="top">Home</a><a href="#" data-scroll="about">About Us</a><a href="#" data-scroll="services">Services</a><a href="#" data-scroll="contact">Contact Us</a>
-         <a class="phone-btn" href="tel:+919876543210">${ICON.phone} +91 98765 43210</a>`}</nav>
+         <a class="phone-btn" href="tel:+919655213027">${ICON.phone} +91 96552 13027</a>`}</nav>
   </header>
   <main>${content}</main>
   <footer>
@@ -183,7 +183,7 @@ function shell(content, { admin = false, activeNav = '' } = {}) {
       <div><b style="color:#fff">VELAN TRAVELS</b><p style="margin-top:8px;font-size:12.5px">Safe, reliable and always with you — for every journey, big or small.</p></div>
       <div><b style="color:#fff">Customers</b><p style="margin-top:8px"><a href="#book" style="display:block;padding:3px 0">Book a Trip</a><a href="#status" style="display:block;padding:3px 0">Check Booking Status</a><a href="#my-bookings" style="display:block;padding:3px 0">My Bookings</a></p></div>
       <div><b style="color:#fff">Partners</b><p style="margin-top:8px"><a href="#driver" style="display:block;padding:3px 0">Driver Login</a><a href="#admin" style="display:block;padding:3px 0">Admin Login</a></p></div>
-      <div><b style="color:#fff">Contact</b><p style="margin-top:8px;font-size:12.5px">+91 98765 43210<br>info@velantravels.com</p></div>
+      <div><b style="color:#fff">Contact</b><p style="margin-top:8px;font-size:12.5px">+91 96552 13027<br>info@velantravels.com</p></div>
     </div>
     <div style="border-top:1px solid rgba(255,255,255,.12);padding-top:14px">© ${new Date().getFullYear()} Velan Travels · Safe • Reliable • Always With You</div>
   </footer>`;
@@ -282,7 +282,7 @@ function home() {
   <section class="section" id="contact" style="padding-top:0">
     <div class="card" style="max-width:1136px;margin:0 auto">
       <h2>Contact Us</h2>
-      <p style="color:var(--muted)">${ICON.phone} &nbsp;+91 98765 43210 &nbsp;·&nbsp; info@velantravels.com</p>
+      <p style="color:var(--muted)">${ICON.phone} &nbsp;+91 96552 13027 &nbsp;·&nbsp; info@velantravels.com</p>
     </div>
   </section>
   `, { activeNav: '' });
