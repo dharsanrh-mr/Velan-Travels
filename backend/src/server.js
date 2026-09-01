@@ -10,7 +10,7 @@ const { calcDistanceKm, mapsConfigured, GOOGLE_MAPS_BROWSER_KEY } = require('./m
 
 const app = express();
 const PORT = process.env.PORT || 4000;
-const allowedOrigins = new Set(String(process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean));
+const allowedOrigins = new Set(String(process.env.CORS_ORIGINS || 'https://velan-travels.onrender.com').split(',').map(s => s.trim()).filter(Boolean));
 if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 app.disable('x-powered-by');
 const dbPath = path.join(__dirname, '../../velan-travels.db');
