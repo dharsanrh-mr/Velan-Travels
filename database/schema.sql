@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS bookings (
   additional_requirements TEXT,
   estimated_distance_km REAL,
   estimated_fare REAL,
+  discount_amount REAL NOT NULL DEFAULT 0,
+  promo_code TEXT,
+  referral_code TEXT,
+  payment_status TEXT NOT NULL DEFAULT 'UNPAID',
+  payment_order_id TEXT,
+  payment_id TEXT,
   status TEXT NOT NULL DEFAULT 'PENDING',
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
@@ -96,3 +102,52 @@ CREATE TABLE IF NOT EXISTS booking_events (
   FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_booking_events_booking ON booking_events(booking_id, created_at);
+
+
+-- Future-ready business, tracking, feedback and maintenance tables.
+CREATE TABLE IF NOT EXISTS promo_codes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, discount_type TEXT NOT NULL DEFAULT 'PERCENT',
+  discount_value REAL NOT NULL DEFAULT 0, max_discount REAL, min_fare REAL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1,
+  expires_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS booking_ratings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, booking_id INTEGER UNIQUE NOT NULL, rating INTEGER NOT NULL, review TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS driver_locations (
+  driver_id INTEGER PRIMARY KEY, latitude REAL NOT NULL, longitude REAL NOT NULL, accuracy REAL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(driver_id) REFERENCES drivers(id) ON DELETE CASCADE
+);
+-- Compatibility tables for the operations/admin UI.
+CREATE TABLE IF NOT EXISTS maintenance (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL, maintenance_type TEXT NOT NULL,
+  service_date TEXT, odometer_km REAL, notes TEXT, next_due_date TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS coupons (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, type TEXT NOT NULL DEFAULT 'PERCENT',
+  value REAL NOT NULL DEFAULT 0, min_fare REAL DEFAULT 0, max_discount REAL, usage_limit INTEGER,
+  used_count INTEGER NOT NULL DEFAULT 0, expires_at TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_maintenance_due ON maintenance(next_due_date);
+CREATE INDEX IF NOT EXISTS idx_coupon_code ON coupons(code);
+
+CREATE TABLE IF NOT EXISTS vehicle_maintenance (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL, maintenance_type TEXT NOT NULL, notes TEXT, due_date TEXT,
+  completed INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, actor_type TEXT NOT NULL, actor TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT,
+  details TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS idx_promo_code ON promo_codes(code);
+CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON vehicle_maintenance(vehicle_id, due_date);
+CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
+
+
+
+CREATE TABLE IF NOT EXISTS referrals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_mobile TEXT NOT NULL, referral_code TEXT UNIQUE NOT NULL,
+  referred_mobile TEXT, reward_amount REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'ACTIVE', created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
