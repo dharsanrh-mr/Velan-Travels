@@ -132,17 +132,13 @@ CREATE TABLE IF NOT EXISTS coupons (
 CREATE INDEX IF NOT EXISTS idx_maintenance_due ON maintenance(next_due_date);
 CREATE INDEX IF NOT EXISTS idx_coupon_code ON coupons(code);
 
-CREATE TABLE IF NOT EXISTS vehicle_maintenance (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL, maintenance_type TEXT NOT NULL, notes TEXT, due_date TEXT,
-  completed INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE
-);
 CREATE TABLE IF NOT EXISTS audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, actor_type TEXT NOT NULL, actor TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT,
   details TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS idx_promo_code ON promo_codes(code);
-CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON vehicle_maintenance(vehicle_id, due_date);
+CREATE INDEX IF NOT EXISTS idx_maintenance_vehicle ON maintenance(vehicle_id, next_due_date);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at);
 
 
