@@ -10,6 +10,9 @@ const { calcDistanceKm, mapsConfigured, GOOGLE_MAPS_BROWSER_KEY } = require('./m
 
 const app = express();
 const PORT = process.env.PORT || 4000;
+const allowedOrigins = new Set(String(process.env.CORS_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean));
+if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
+app.disable('x-powered-by');
 const dbPath = path.join(__dirname, '../../velan-travels.db');
 const db = new Database(dbPath);
 
@@ -26,6 +29,7 @@ db.exec(`CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY, kind TEXT NOT NULL, subject TEXT NOT NULL, expires_at INTEGER NOT NULL
 )`);
 db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()); // sweep stale sessions on boot
+setInterval(() => db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(Date.now()), 60 * 60 * 1000).unref();
 
 // ---------- migration: otps table for existing DBs created before customer login ----------
 db.exec(`CREATE TABLE IF NOT EXISTS otps (
@@ -164,9 +168,62 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-app.use(cors());
-app.use(express.json());
-app.use(express.static(path.join(__dirname, '../../frontend')));
+// Lightweight abuse protection for unauthenticated public endpoints.
+const publicAttempts = new Map();
+const PUBLIC_WINDOW_MS = 60 * 1000;
+const PUBLIC_MAX = 60;
+function publicRateLimit(req, res, next) {
+  const key = req.ip || 'unknown';
+  const now = Date.now();
+  const attempts = (publicAttempts.get(key) || []).filter(t => now - t < PUBLIC_WINDOW_MS);
+  if (attempts.length >= PUBLIC_MAX) {
+    res.set('Retry-After', '60');
+    return res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
+  }
+  attempts.push(now);
+  publicAttempts.set(key, attempts);
+  next();
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, attempts] of publicAttempts) {
+    const fresh = attempts.filter(t => now - t < PUBLIC_WINDOW_MS);
+    if (fresh.length) publicAttempts.set(key, fresh); else publicAttempts.delete(key);
+  }
+}, 60 * 1000).unref();
+
+// Production-safe HTTP defaults. CORS is closed by default because the frontend
+// is served from this same Express app. Set CORS_ORIGINS only when a separate
+// frontend origin genuinely needs API access.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'none'",
+    "script-src 'self' https://maps.googleapis.com https://maps.gstatic.com",
+    "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com",
+    "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com",
+    "style-src 'self' 'unsafe-inline'", "font-src 'self' data: https://fonts.gstatic.com", "object-src 'none'"
+  ].join('; '));
+  next();
+});
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error('CORS origin not allowed'));
+  },
+  methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  maxAge: 600
+}));
+app.use(express.json({ limit: '64kb' }));
+app.use(express.static(path.join(__dirname, '../../frontend'), {
+  etag: true,
+  maxAge: process.env.NODE_ENV === 'production' ? '1h' : 0
+}));
 
 function makeBookingId() {
   // crypto.randomBytes instead of Math.random for a non-guessable, well-
@@ -348,7 +405,7 @@ app.get('/api/config', (req, res) => {
   res.json({ mapsBrowserKey: GOOGLE_MAPS_BROWSER_KEY || '', mapsEnabled: mapsConfigured });
 });
 
-app.get('/api/distance', async (req, res) => {
+app.get('/api/distance', publicRateLimit, async (req, res) => {
   const { pickup, drop } = req.query;
   if (!pickup || !drop) return res.status(400).json({ error: 'pickup and drop are required' });
   if (!mapsConfigured) return res.status(501).json({ error: 'Distance auto-calc not configured' });
@@ -370,7 +427,7 @@ app.get('/api/drivers', (req, res) => {
 });
 
 // ---------- bookings ----------
-app.post('/api/bookings', (req, res) => {
+app.post('/api/bookings', publicRateLimit, (req, res) => {
   const b = req.body || {};
   if (!b.name || !b.mobile || !b.pickup || !b.drop || !b.date || !b.time || !b.vehicleId || !b.passengers)
     return res.status(400).json({ error: 'Please fill all required fields' });
@@ -655,6 +712,9 @@ app.patch('/api/admin/settings/password', adminOnly, (req, res) => {
   if (!newPassword || newPassword.length < 6)
     return res.status(400).json({ error: 'New password must be at least 6 characters' });
   db.prepare('UPDATE admins SET password_hash=? WHERE id=?').run(hashPassword(newPassword), admin.id);
+  // Revoke every admin session after a password change so an old token cannot
+  // remain valid if it was copied or left active on another device.
+  db.prepare("DELETE FROM sessions WHERE kind='admin'").run();
   res.json({ ok: true });
 });
 
@@ -744,6 +804,23 @@ app.patch('/api/admin/drivers/:id', adminOnly, (req, res) => {
       .run(name, mobile, vehicleId || null, status, req.params.id);
   }
   res.json({ ok: true });
+});
+
+// ---------- admin: database backup (no schema/data mutation) ----------
+app.get('/api/admin/backup', adminOnly, (req, res) => {
+  if (!fs.existsSync(dbPath)) return res.status(404).json({ error: 'Database file not found' });
+  res.setHeader('Content-Type', 'application/octet-stream');
+  res.setHeader('Content-Disposition', `attachment; filename="velan-travels-backup-${new Date().toISOString().slice(0,10)}.db"`);
+  const checkpoint = db.pragma('wal_checkpoint(PASSIVE)');
+  return res.sendFile(dbPath, { dotfiles: 'deny' }, err => { if (err && !res.headersSent) res.status(500).json({ error: 'Backup failed' }); });
+});
+
+// Do not leak stack traces or internal errors to clients.
+app.use((err, req, res, next) => {
+  if (err?.message === 'CORS origin not allowed') return res.status(403).json({ error: 'Origin not allowed' });
+  console.error('[server]', err?.message || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal server error' });
 });
 
 app.get('*', (req, res) => {
