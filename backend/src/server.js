@@ -13,6 +13,15 @@ const PORT = process.env.PORT || 4000;
 const allowedOrigins = new Set(String(process.env.CORS_ORIGINS || 'https://velan-travels.onrender.com').split(',').map(s => s.trim()).filter(Boolean));
 if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 app.disable('x-powered-by');
+// Production security headers without adding another dependency.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(self), camera=(), microphone=()');
+  if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
 const dbPath = path.join(__dirname, '../../velan-travels.db');
 const db = new Database(dbPath);
 
@@ -22,6 +31,26 @@ db.exec(schema);
 // Timeline migration is included in schema.sql; this explicit CREATE keeps existing production DBs safe.
 db.exec(`CREATE TABLE IF NOT EXISTS booking_events (id INTEGER PRIMARY KEY AUTOINCREMENT, booking_id INTEGER NOT NULL, event_type TEXT NOT NULL, message TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE)`);
 db.exec('CREATE INDEX IF NOT EXISTS idx_booking_events_booking ON booking_events(booking_id, created_at)');
+try { db.exec('ALTER TABLE bookings ADD COLUMN discount_amount REAL NOT NULL DEFAULT 0'); } catch (e) {}
+try { db.exec('ALTER TABLE bookings ADD COLUMN promo_code TEXT'); } catch (e) {}
+try { db.exec('ALTER TABLE bookings ADD COLUMN referral_code TEXT'); } catch (e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'UNPAID'"); } catch (e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN payment_order_id TEXT"); } catch (e) {}
+try { db.exec("ALTER TABLE bookings ADD COLUMN payment_id TEXT"); } catch (e) {}
+
+
+// Future feature tables for existing databases
+db.exec(`CREATE TABLE IF NOT EXISTS promo_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, discount_type TEXT NOT NULL DEFAULT 'PERCENT', discount_value REAL NOT NULL DEFAULT 0, max_discount REAL, min_fare REAL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, expires_at TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+db.exec(`CREATE TABLE IF NOT EXISTS booking_ratings (id INTEGER PRIMARY KEY AUTOINCREMENT, booking_id INTEGER UNIQUE NOT NULL, rating INTEGER NOT NULL, review TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE)`);
+db.exec(`CREATE TABLE IF NOT EXISTS driver_locations (driver_id INTEGER PRIMARY KEY, latitude REAL NOT NULL, longitude REAL NOT NULL, accuracy REAL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(driver_id) REFERENCES drivers(id) ON DELETE CASCADE)`);
+// Compatibility tables used by the Operations UI.
+db.exec(`CREATE TABLE IF NOT EXISTS maintenance (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL, maintenance_type TEXT NOT NULL, service_date TEXT, odometer_km REAL, notes TEXT, next_due_date TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE)`);
+db.exec(`CREATE TABLE IF NOT EXISTS coupons (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, type TEXT NOT NULL DEFAULT 'PERCENT', value REAL NOT NULL DEFAULT 0, min_fare REAL DEFAULT 0, max_discount REAL, usage_limit INTEGER, used_count INTEGER NOT NULL DEFAULT 0, expires_at TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+
+db.exec(`CREATE TABLE IF NOT EXISTS vehicle_maintenance (id INTEGER PRIMARY KEY AUTOINCREMENT, vehicle_id INTEGER NOT NULL, maintenance_type TEXT NOT NULL, notes TEXT, due_date TEXT, completed INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE CASCADE)`);
+db.exec(`CREATE TABLE IF NOT EXISTS audit_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, actor_type TEXT NOT NULL, actor TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, details TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)`);
+db.exec(`CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
+
 
 // ---------- migration: add drivers.pin_hash for existing DBs created before PIN login ----------
 try { db.exec('ALTER TABLE drivers ADD COLUMN pin_hash TEXT'); } catch (e) { /* column already exists */ }
@@ -40,6 +69,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS otps (
   expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP
 )`);
 db.prepare('DELETE FROM otps WHERE expires_at < ?').run(Date.now()); // sweep stale OTPs on boot
+
+// ---------- future pricing defaults ----------
+for (const [k,v] of [['peak_enabled','0'],['peak_multiplier','1.0'],['business_name','Velan Travels']]) {
+  db.prepare('INSERT OR IGNORE INTO app_settings(key,value) VALUES(?,?)').run(k,v);
+}
+function setting(key, fallback='') { const r=db.prepare('SELECT value FROM app_settings WHERE key=?').get(key); return r ? r.value : fallback; }
 
 // ---------- password hashing (scrypt, no extra native deps) ----------
 function hashPassword(password) {
@@ -322,7 +357,7 @@ app.patch('/api/driver/bookings/:id/status', driverOnly, (req, res) => {
   const nextAllowed = DRIVER_ALLOWED_TRANSITIONS[row.status];
   if (!nextAllowed || req.body.status !== nextAllowed)
     return res.status(400).json({ error: `Cannot move from ${row.status} to ${req.body.status}` });
-  db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(nextAllowed, row.id);
+  db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(nextAllowed, row.id); audit('driver', String(req.driverId), 'TRIP_STATUS_CHANGED', 'booking', row.id, nextAllowed);
   const cust = db.prepare('SELECT mobile FROM customers WHERE id=?').get(row.customer_id);
   if (cust) notify(cust.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: nextAllowed }));
   res.json({ ok: true, status: nextAllowed });
@@ -385,7 +420,7 @@ app.post('/api/customer/logout', customerOnly, (req, res) => {
 // ---------- customer: my booking history ----------
 app.get('/api/customer/bookings', customerOnly, (req, res) => {
   const rows = db.prepare(`
-    SELECT b.*, v.name vehicle_name, v.vehicle_number, d.name driver_name, d.mobile driver_mobile
+    SELECT b.*, v.name vehicle_name, v.vehicle_number, d.name driver_name, d.mobile driver_mobile, d.last_lat driver_lat, d.last_lng driver_lng, d.location_updated_at driver_location_updated_at
     FROM bookings b
     JOIN customers c ON c.id = b.customer_id
     LEFT JOIN vehicles v ON v.id = b.vehicle_id
@@ -439,6 +474,74 @@ function recordBookingEvent(bookingDbId, eventType, message) {
   catch (e) { console.error('[timeline]', e.message); }
 }
 
+
+// ---------- Future-ready platform helpers ----------
+function calculatePromo(code, fare) {
+  if (!code) return { amount: 0, code: null };
+  const codeText=String(code).trim();
+  const p = db.prepare('SELECT * FROM promo_codes WHERE upper(code)=upper(?) AND active=1').get(codeText);
+  if (p) {
+    if ((p.expires_at && new Date(p.expires_at) < new Date()) || fare < Number(p.min_fare || 0)) return { amount: 0, code: null };
+    let amount = p.discount_type === 'FLAT' ? Number(p.discount_value) : fare * Number(p.discount_value) / 100;
+    if (p.max_discount != null) amount = Math.min(amount, Number(p.max_discount));
+    amount = Math.max(0, Math.min(fare, Math.round(amount)));
+    return { amount, code: p.code };
+  }
+  const c=db.prepare('SELECT * FROM coupons WHERE upper(code)=upper(?) AND active=1').get(codeText);
+  if (!c || (c.expires_at && new Date(c.expires_at) < new Date()) || fare < Number(c.min_fare||0) || (c.usage_limit!=null && c.used_count>=c.usage_limit)) return { amount:0, code:null };
+  let amount=c.type==='FLAT'?Number(c.value):fare*Number(c.value)/100; if(c.max_discount!=null)amount=Math.min(amount,Number(c.max_discount)); amount=Math.max(0,Math.min(fare,Math.round(amount)));
+  return {amount,code:c.code};
+}
+
+app.get('/api/promos/validate', publicRateLimit, (req, res) => {
+  const fare = Math.max(0, Number(req.query.fare || 0));
+  const result = calculatePromo(req.query.code, fare);
+  if (!result.code) return res.status(404).json({ error: 'Invalid or expired promo code' });
+  res.json({ ...result, finalFare: Math.max(0, fare - result.amount) });
+});
+
+// Customer feedback after completed trips.
+app.post('/api/customer/bookings/:bookingId/rating', customerOnly, (req, res) => {
+  const booking = db.prepare(`SELECT b.* FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.booking_id=? AND c.mobile=?`).get(req.params.bookingId, req.customerMobile);
+  if (!booking) return res.status(404).json({ error: 'Booking not found' });
+  if (booking.status !== 'COMPLETED') return res.status(400).json({ error: 'Rating is available after trip completion' });
+  const rating = Number(req.body.rating);
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) return res.status(400).json({ error: 'Rating must be 1 to 5' });
+  db.prepare('INSERT INTO booking_ratings(booking_id,rating,review) VALUES(?,?,?) ON CONFLICT(booking_id) DO UPDATE SET rating=excluded.rating, review=excluded.review').run(booking.id, rating, String(req.body.review || '').slice(0,1000));
+  audit('customer', req.customerMobile, 'rating_submitted', 'booking', booking.booking_id, String(rating));
+  res.json({ ok: true });
+});
+app.get('/api/bookings/:bookingId/rating', (req,res) => {
+  const r = db.prepare('SELECT rating,review,created_at FROM booking_ratings br JOIN bookings b ON b.id=br.booking_id WHERE b.booking_id=?').get(req.params.bookingId);
+  res.json(r || null);
+});
+
+// Live driver location: driver publishes GPS; customer/admin reads it.
+app.patch('/api/driver/location', driverOnly, (req,res) => {
+  const lat=Number(req.body.latitude), lng=Number(req.body.longitude), accuracy=req.body.accuracy == null ? null : Number(req.body.accuracy);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) return res.status(400).json({error:'Invalid location'});
+  db.prepare(`INSERT INTO driver_locations(driver_id,latitude,longitude,accuracy,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(driver_id) DO UPDATE SET latitude=excluded.latitude,longitude=excluded.longitude,accuracy=excluded.accuracy,updated_at=CURRENT_TIMESTAMP`).run(req.driverId,lat,lng,accuracy);
+  res.json({ok:true});
+});
+app.get('/api/bookings/:bookingId/live', publicRateLimit, (req,res) => {
+  const b=db.prepare(`SELECT b.booking_id,b.status,d.id driver_id,d.name driver_name,d.mobile driver_mobile,dl.latitude,dl.longitude,dl.accuracy,dl.updated_at FROM bookings b LEFT JOIN drivers d ON d.id=b.driver_id LEFT JOIN driver_locations dl ON dl.driver_id=d.id WHERE b.booking_id=?`).get(req.params.bookingId);
+  if (!b) return res.status(404).json({error:'Booking not found'});
+  res.json(b);
+});
+
+// Maintenance tracker.
+
+// Promo administration.
+app.get('/api/admin/promos', adminOnly, (req,res)=>res.json(db.prepare('SELECT * FROM promo_codes ORDER BY created_at DESC').all()));
+app.post('/api/admin/promos', adminOnly, (req,res)=>{ const b=req.body||{}; if(!b.code||!Number.isFinite(Number(b.discountValue))) return res.status(400).json({error:'Code and discount are required'}); try { const r=db.prepare('INSERT INTO promo_codes(code,discount_type,discount_value,max_discount,min_fare,active,expires_at) VALUES(?,?,?,?,?,?,?)').run(String(b.code).trim().toUpperCase(),b.discountType==='FLAT'?'FLAT':'PERCENT',Number(b.discountValue),b.maxDiscount===''?null:Number(b.maxDiscount),Number(b.minFare||0),b.active===false?0:1,b.expiresAt||null); audit('admin',req.adminEmail,'promo_created','promo',r.lastInsertRowid,b.code); res.json({ok:true,id:r.lastInsertRowid}); } catch(e){res.status(409).json({error:'Promo code already exists'});} });
+app.patch('/api/admin/promos/:id', adminOnly, (req,res)=>{db.prepare('UPDATE promo_codes SET active=? WHERE id=?').run(req.body.active?1:0,req.params.id); audit('admin',req.adminEmail,'promo_toggled','promo',req.params.id,String(req.body.active)); res.json({ok:true});});
+
+app.get('/api/admin/audit', adminOnly, (req,res)=>res.json(db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200').all()));
+
+// Simple configurable peak pricing multiplier (defaults to 1). Admin can update it; booking UI can read it.
+app.get('/api/pricing', (req,res)=>{ const s=db.prepare('SELECT value FROM app_settings WHERE key=?').get('peak_multiplier'); res.json({peakMultiplier:s?Number(s.value):1}); });
+app.patch('/api/admin/pricing', adminOnly, (req,res)=>{ const m=Number(req.body.peakMultiplier); if(!Number.isFinite(m)||m<1||m>3)return res.status(400).json({error:'Multiplier must be between 1 and 3'}); db.prepare('INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run('peak_multiplier',String(m)); audit('admin',req.adminEmail,'pricing_updated','settings','peak_multiplier',String(m)); res.json({ok:true,peakMultiplier:m}); });
+
 // ---------- bookings ----------
 app.post('/api/bookings', publicRateLimit, (req, res) => {
   const b = req.body || {};
@@ -463,27 +566,34 @@ app.post('/api/bookings', publicRateLimit, (req, res) => {
   let estFare = null, estDistance = null;
   if (b.distanceKm) {
     estDistance = Number(b.distanceKm);
-    estFare = Math.round(vehicle.base_fare + estDistance * vehicle.rate_per_km);
+    const baseFare = Math.round(vehicle.base_fare + estDistance * vehicle.rate_per_km);
+    const pricing = db.prepare('SELECT value FROM app_settings WHERE key=?').get('peak_multiplier');
+    const enabled = setting('peak_enabled','0') === '1';
+    const multiplier = enabled && pricing ? Math.min(3, Math.max(1, Number(pricing.value))) : 1;
+    const grossFare = Math.round(baseFare * multiplier);
+    const promo = calculatePromo(b.promoCode, grossFare);
+    estFare = Math.max(0, grossFare - promo.amount);
+    b.__discountAmount = promo.amount; b.__promoCode = promo.code;
   }
 
   const customer = db.prepare('INSERT INTO customers(name,mobile) VALUES(?,?)').run(b.name, b.mobile);
   const insertBooking = db.prepare(`INSERT INTO bookings
-    (booking_id,customer_id,pickup_location,drop_location,journey_date,journey_time,vehicle_id,passengers,additional_requirements,estimated_distance_km,estimated_fare)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
+    (booking_id,customer_id,pickup_location,drop_location,journey_date,journey_time,vehicle_id,passengers,additional_requirements,estimated_distance_km,estimated_fare,discount_amount,promo_code,referral_code)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   let bookingId;
   // booking_id is UNIQUE — retry with a fresh random ID on the astronomically
   // unlikely chance of a collision, instead of erroring out the whole booking.
   for (let attempt = 0; attempt < 5; attempt++) {
     bookingId = makeBookingId();
     try {
-      insertBooking.run(bookingId, customer.lastInsertRowid, b.pickup, b.drop, b.date, b.time, b.vehicleId, Number(b.passengers), b.requirements || '', estDistance, estFare);
+      insertBooking.run(bookingId, customer.lastInsertRowid, b.pickup, b.drop, b.date, b.time, b.vehicleId, Number(b.passengers), b.requirements || '', estDistance, estFare, Number(b.__discountAmount || 0), b.__promoCode || null, b.referralCode || null);
       break;
     } catch (e) {
       if (attempt === 4) throw e;
     }
   }
   const created = db.prepare('SELECT id FROM bookings WHERE booking_id=?').get(bookingId);
-  if (created) recordBookingEvent(created.id, 'BOOKING_CREATED', 'Booking received');
+  if (created) { recordBookingEvent(created.id, 'BOOKING_CREATED', 'Booking received'); audit('customer', b.mobile, 'BOOKING_CREATED', 'booking', created.id, bookingId); }
   notify(b.mobile, bookingConfirmedMsg({ bookingId, pickup: b.pickup, drop: b.drop, date: b.date, time: b.time, fare: estFare }));
   res.status(201).json({ bookingId, estimatedFare: estFare });
 });
@@ -491,11 +601,12 @@ app.post('/api/bookings', publicRateLimit, (req, res) => {
 app.get('/api/bookings/:bookingId', (req, res) => {
   const row = db.prepare(`
     SELECT b.*, c.name customer_name, c.mobile, v.name vehicle_name, v.vehicle_number,
-           d.name driver_name, d.mobile driver_mobile
+           d.name driver_name, d.mobile driver_mobile, dl.latitude driver_latitude, dl.longitude driver_longitude, dl.updated_at driver_location_updated_at
     FROM bookings b
     JOIN customers c ON c.id=b.customer_id
     LEFT JOIN vehicles v ON v.id=b.vehicle_id
     LEFT JOIN drivers d ON d.id=b.driver_id
+    LEFT JOIN driver_locations dl ON dl.driver_id=d.id
     WHERE b.booking_id=?
   `).get(req.params.bookingId);
   if (!row) return res.status(404).json({ error: 'Booking not found' });
@@ -560,6 +671,94 @@ app.patch('/api/bookings/:bookingId/cancel', (req, res) => {
     if (driver) notify(driver.mobile, statusUpdateMsg({ bookingId: row.booking_id, status: 'CANCELLED' }));
   }
   res.json({ ok: true });
+});
+
+
+// ---------- customer: optional Razorpay online payments ----------
+app.get('/api/customer/payments/config', customerOnly, (req,res)=>{
+  res.json({ enabled: Boolean(process.env.RAZORPAY_KEY_ID), keyId: process.env.RAZORPAY_KEY_ID || '' });
+});
+
+app.post('/api/customer/payments/order', customerOnly, async (req,res)=>{
+  const bookingId=String(req.body?.bookingId||'').trim();
+  const row=db.prepare(`SELECT b.*,c.mobile FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.booking_id=? AND c.mobile=?`).get(bookingId,req.customerMobile);
+  if(!row) return res.status(404).json({error:'Booking not found'});
+  if(row.payment_status==='PAID') return res.status(409).json({error:'Booking is already paid'});
+  const amount=Math.round(Number(row.estimated_fare||0)*100);
+  if(!amount) return res.status(400).json({error:'No payable fare is available for this booking'});
+  if(!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET)
+    return res.status(503).json({error:'Online payment is not configured yet'});
+  try {
+    const auth=Buffer.from(`${process.env.RAZORPAY_KEY_ID}:${process.env.RAZORPAY_KEY_SECRET}`).toString('base64');
+    const rr=await fetch('https://api.razorpay.com/v1/orders',{
+      method:'POST', headers:{Authorization:`Basic ${auth}`,'Content-Type':'application/json'},
+      body:JSON.stringify({amount,currency:'INR',receipt:bookingId,notes:{booking_id:bookingId}})
+    });
+    const order=await rr.json();
+    if(!rr.ok) return res.status(502).json({error:'Payment provider could not create the order'});
+    db.prepare(`UPDATE bookings SET payment_order_id=?,payment_status='PENDING',updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(order.id,row.id);
+    audit('customer',req.customerMobile,'PAYMENT_ORDER_CREATED','booking',row.id,order.id);
+    res.json({orderId:order.id,amount:order.amount,currency:order.currency,keyId:process.env.RAZORPAY_KEY_ID});
+  } catch(e) { console.error('[payment]',e.message); res.status(502).json({error:'Payment provider unavailable'}); }
+});
+
+app.post('/api/customer/payments/verify', customerOnly, (req,res)=>{
+  const bookingId=String(req.body?.bookingId||'').trim(), paymentId=String(req.body?.razorpay_payment_id||'').trim(), orderId=String(req.body?.razorpay_order_id||'').trim(), signature=String(req.body?.razorpay_signature||'').trim();
+  const row=db.prepare(`SELECT b.*,c.mobile FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.booking_id=? AND c.mobile=?`).get(bookingId,req.customerMobile);
+  if(!row) return res.status(404).json({error:'Booking not found'});
+  if(!process.env.RAZORPAY_KEY_SECRET) return res.status(503).json({error:'Online payment is not configured yet'});
+  if(row.payment_order_id!==orderId) return res.status(400).json({error:'Payment order does not match this booking'});
+  const expected=crypto.createHmac('sha256',process.env.RAZORPAY_KEY_SECRET).update(`${orderId}|${paymentId}`).digest('hex');
+  const a=Buffer.from(expected), b=Buffer.from(signature); if(a.length!==b.length || !crypto.timingSafeEqual(a,b)) return res.status(400).json({error:'Payment verification failed'});
+  db.prepare(`UPDATE bookings SET payment_status='PAID',payment_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=?`).run(paymentId,row.id);
+  recordBookingEvent(row.id,'PAYMENT_RECEIVED','Online payment received');
+  audit('customer',req.customerMobile,'PAYMENT_RECEIVED','booking',row.id,paymentId);
+  res.json({ok:true,paymentStatus:'PAID'});
+});
+
+// ---------- customer: printable invoice / receipt ----------
+app.get('/api/customer/bookings/:bookingId/receipt', customerOnly, (req,res)=>{
+  const row=db.prepare(`SELECT b.*,c.name customer_name,c.mobile,v.name vehicle_name,v.vehicle_number,d.name driver_name,d.mobile driver_mobile FROM bookings b JOIN customers c ON c.id=b.customer_id LEFT JOIN vehicles v ON v.id=b.vehicle_id LEFT JOIN drivers d ON d.id=b.driver_id WHERE b.booking_id=? AND c.mobile=?`).get(req.params.bookingId,req.customerMobile);
+  if(!row) return res.status(404).json({error:'Booking not found'});
+  res.json({businessName:setting('business_name','Velan Travels'),...row,generatedAt:new Date().toISOString()});
+});
+
+// ---------- admin: booking calendar ----------
+app.get('/api/admin/calendar', adminOnly, (req,res)=>{
+  const from=String(req.query.from||'').trim(), to=String(req.query.to||'').trim();
+  if(!from||!to) return res.status(400).json({error:'from and to dates are required'});
+  const rows=db.prepare(`SELECT b.booking_id,b.journey_date,b.journey_time,b.status,b.pickup_location,b.drop_location,b.estimated_fare,c.name customer_name,v.name vehicle_name,d.name driver_name FROM bookings b JOIN customers c ON c.id=b.customer_id LEFT JOIN vehicles v ON v.id=b.vehicle_id LEFT JOIN drivers d ON d.id=b.driver_id WHERE b.journey_date BETWEEN ? AND ? ORDER BY b.journey_date,b.journey_time`).all(from,to);
+  res.json(rows);
+});
+
+// ---------- production health / readiness ----------
+app.get('/api/health', (req,res) => {
+  try { db.prepare('SELECT 1').get(); res.json({ok:true,service:'velan-travels',environment:process.env.NODE_ENV||'development',time:new Date().toISOString()}); }
+  catch(e) { res.status(503).json({ok:false,service:'velan-travels'}); }
+});
+app.get('/api/ready', (req,res) => {
+  const required = ['ADMIN_EMAIL','ADMIN_PASSWORD'];
+  const missing = required.filter(k => !process.env[k]);
+  res.status(missing.length ? 503 : 200).json({ready:!missing.length,missing});
+});
+
+// ---------- admin: revenue + notification center ----------
+app.get('/api/admin/revenue', adminOnly, (req,res) => {
+  const days=Math.min(Math.max(Number(req.query.days)||30,1),365);
+  const rows=db.prepare(`SELECT journey_date date, COUNT(*) bookings, COALESCE(SUM(CASE WHEN status='COMPLETED' THEN estimated_fare ELSE 0 END),0) revenue, COALESCE(SUM(CASE WHEN payment_status='PAID' THEN estimated_fare ELSE 0 END),0) paid_revenue FROM bookings WHERE journey_date >= date('now', ? || ' days') GROUP BY journey_date ORDER BY journey_date`).all(String(-days));
+  const totals=db.prepare(`SELECT COUNT(*) bookings, COALESCE(SUM(CASE WHEN status='COMPLETED' THEN estimated_fare ELSE 0 END),0) revenue, COALESCE(SUM(CASE WHEN payment_status='PAID' THEN estimated_fare ELSE 0 END),0) paid_revenue, COALESCE(SUM(CASE WHEN payment_status!='PAID' AND status!='CANCELLED' THEN estimated_fare ELSE 0 END),0) outstanding FROM bookings WHERE journey_date >= date('now', ? || ' days')`).get(String(-days));
+  res.json({days,rows,totals});
+});
+app.get('/api/admin/notifications', adminOnly, (req,res) => {
+  const today=new Date().toISOString().slice(0,10);
+  const list=[];
+  const unassigned=db.prepare(`SELECT booking_id,journey_date,journey_time FROM bookings WHERE journey_date=? AND status IN ('PENDING','CONFIRMED') ORDER BY journey_time`).all(today);
+  unassigned.forEach(r=>list.push({type:'UNASSIGNED',priority:'high',title:'Booking needs driver',message:`${r.booking_id} · ${r.journey_time}`}));
+  const overdue=db.prepare(`SELECT booking_id,journey_date FROM bookings WHERE journey_date < ? AND status NOT IN ('COMPLETED','CANCELLED') ORDER BY journey_date DESC LIMIT 20`).all(today);
+  overdue.forEach(r=>list.push({type:'OVERDUE',priority:'high',title:'Trip needs attention',message:`${r.booking_id} · ${r.journey_date}`}));
+  const pendingPay=db.prepare(`SELECT booking_id,estimated_fare FROM bookings WHERE payment_status='PENDING' AND status!='CANCELLED' ORDER BY updated_at DESC LIMIT 20`).all();
+  pendingPay.forEach(r=>list.push({type:'PAYMENT',priority:'medium',title:'Payment pending',message:`${r.booking_id} · ₹${Number(r.estimated_fare||0).toFixed(0)}`}));
+  res.json(list.slice(0,50));
 });
 
 // ---------- admin: dashboard ----------
@@ -755,6 +954,7 @@ app.patch('/api/admin/bookings/:id/status', adminOnly, (req, res) => {
   db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
     .run(req.body.status, req.params.id);
   recordBookingEvent(req.params.id, 'STATUS_CHANGED', `Status changed to ${req.body.status.replaceAll('_', ' ')}`);
+  const statusRow = db.prepare('SELECT booking_id FROM bookings WHERE id=?').get(req.params.id); audit('admin', req.adminEmail, 'status_changed', 'booking', statusRow?.booking_id || req.params.id, req.body.status); audit('admin', req.adminEmail, 'STATUS_CHANGED', 'booking', req.params.id, req.body.status);
   const row = db.prepare(`
     SELECT b.booking_id, c.mobile FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.id=?
   `).get(req.params.id);
@@ -776,7 +976,7 @@ app.patch('/api/admin/bookings/:id/driver', adminOnly, (req, res) => {
   db.prepare("UPDATE bookings SET driver_id=?,status='DRIVER_ASSIGNED',updated_at=CURRENT_TIMESTAMP WHERE id=?")
     .run(driverId, req.params.id);
   recordBookingEvent(req.params.id, driverId ? 'DRIVER_ASSIGNED' : 'DRIVER_UNASSIGNED',
-    driverId ? 'Driver assigned' : 'Driver assignment removed');
+    driverId ? 'Driver assigned' : 'Driver assignment removed'); audit('admin', req.adminEmail, driverId ? 'DRIVER_ASSIGNED' : 'DRIVER_UNASSIGNED', 'booking', req.params.id, String(driverId || ''));
   if (driverId) {
     const driver = db.prepare('SELECT name, mobile FROM drivers WHERE id=?').get(driverId);
     const customer = db.prepare('SELECT name, mobile FROM customers WHERE id=?').get(booking.customer_id);
@@ -839,6 +1039,40 @@ app.patch('/api/admin/drivers/:id', adminOnly, (req, res) => {
   }
   res.json({ ok: true });
 });
+
+// ---------- customer: referral ----------
+app.post('/api/customer/referrals', customerOnly, (req,res) => { const code='VT'+crypto.randomBytes(4).toString('hex').toUpperCase(); db.prepare('INSERT INTO referrals(referrer_mobile,referral_code) VALUES(?,?)').run(req.customerMobile,code); res.status(201).json({code}); });
+
+// ---------- driver: dashboard / earnings ----------
+app.get('/api/driver/dashboard', driverOnly, (req,res)=>{
+  const today=new Date().toISOString().slice(0,10);
+  const stats=db.prepare(`SELECT COUNT(*) totalTrips, SUM(CASE WHEN status='COMPLETED' THEN 1 ELSE 0 END) completedTrips, SUM(CASE WHEN journey_date=? AND status NOT IN ('CANCELLED') THEN 1 ELSE 0 END) todayTrips, COALESCE(SUM(CASE WHEN status='COMPLETED' THEN estimated_fare ELSE 0 END),0) grossRevenue FROM bookings WHERE driver_id=?`).get(today,req.driverId);
+  const driver=db.prepare('SELECT name,mobile FROM drivers WHERE id=?').get(req.driverId); res.json({...stats,driver});
+});
+
+// Compatibility/admin routes for the operations center.
+app.get('/api/admin/maintenance', adminOnly, (req,res)=>res.json(db.prepare(`SELECT m.*,v.name vehicle_name,v.vehicle_number FROM maintenance m JOIN vehicles v ON v.id=m.vehicle_id ORDER BY m.next_due_date IS NULL,m.next_due_date`).all()));
+app.post('/api/admin/maintenance', adminOnly, (req,res)=>{const b=req.body||{};if(!b.vehicleId||!b.serviceDate)return res.status(400).json({error:'Vehicle and service date are required'});const r=db.prepare('INSERT INTO maintenance(vehicle_id,service_date,odometer_km,notes,next_due_date) VALUES(?,?,?,?,?)').run(b.vehicleId,b.serviceDate,b.odometerKm?Number(b.odometerKm):null,String(b.notes||''),b.nextDueDate||null);audit('admin',req.adminEmail,'maintenance_created','vehicle',b.vehicleId,JSON.stringify(b));res.json({ok:true,id:r.lastInsertRowid});});
+app.patch('/api/admin/maintenance/:id', adminOnly, (req,res)=>{if(req.body.completed){db.prepare('DELETE FROM maintenance WHERE id=?').run(req.params.id);audit('admin',req.adminEmail,'maintenance_completed','maintenance',req.params.id,'completed');}res.json({ok:true});});
+app.post('/api/admin/coupons', adminOnly, (req,res)=>{const b=req.body||{};if(!b.code||!Number.isFinite(Number(b.value)))return res.status(400).json({error:'Coupon code and value are required'});try{const r=db.prepare('INSERT INTO coupons(code,type,value,min_fare,max_discount,usage_limit,expires_at) VALUES(?,?,?,?,?,?,?)').run(String(b.code).trim().toUpperCase(),b.type==='FLAT'?'FLAT':'PERCENT',Number(b.value),Number(b.minFare||0),b.maxDiscount?Number(b.maxDiscount):null,b.usageLimit?Number(b.usageLimit):null,b.expiresAt||null);audit('admin',req.adminEmail,'coupon_created','coupon',r.lastInsertRowid,b.code);res.json({ok:true,id:r.lastInsertRowid});}catch(e){res.status(409).json({error:'Coupon code already exists'});}});
+app.get('/api/admin/coupons', adminOnly, (req,res)=>res.json(db.prepare('SELECT * FROM coupons ORDER BY created_at DESC').all()));
+app.get('/api/admin/referrals', adminOnly, (req,res)=>res.json(db.prepare('SELECT * FROM referrals ORDER BY created_at DESC LIMIT 200').all()));
+
+app.post('/api/customer/bookings/:bookingId/review', customerOnly, (req,res)=>{ req.body={rating:req.body?.rating,review:req.body?.comment||req.body?.review||''}; const booking=db.prepare(`SELECT b.* FROM bookings b JOIN customers c ON c.id=b.customer_id WHERE b.booking_id=? AND c.mobile=?`).get(req.params.bookingId,req.customerMobile); if(!booking)return res.status(404).json({error:'Booking not found'}); if(booking.status!=='COMPLETED')return res.status(400).json({error:'Rating is available after trip completion'}); const rating=Number(req.body.rating); if(!Number.isInteger(rating)||rating<1||rating>5)return res.status(400).json({error:'Rating must be 1 to 5'}); db.prepare('INSERT INTO booking_ratings(booking_id,rating,review) VALUES(?,?,?) ON CONFLICT(booking_id) DO UPDATE SET rating=excluded.rating,review=excluded.review').run(booking.id,rating,req.body.review); res.json({ok:true}); });
+
+// ---------- admin: operations / reports / coupons / maintenance / audit ----------
+app.get('/api/admin/operations', adminOnly, (req,res)=>{
+  const today=new Date().toISOString().slice(0,10);
+  const fleet=db.prepare(`SELECT COUNT(*) total, SUM(status='AVAILABLE') available, SUM(status='MAINTENANCE') maintenance FROM vehicles`).get();
+  const drivers=db.prepare(`SELECT COUNT(*) total, SUM(status='AVAILABLE') available FROM drivers`).get();
+  const unassigned=db.prepare(`SELECT COUNT(*) c FROM bookings WHERE journey_date=? AND status IN ('PENDING','CONFIRMED')`).get(today).c;
+  const upcoming=db.prepare(`SELECT COUNT(*) c FROM bookings WHERE journey_date>=? AND status NOT IN ('CANCELLED','COMPLETED')`).get(today).c;
+  const reviews=db.prepare(`SELECT COUNT(*) count, COALESCE(AVG(rating),0) average FROM booking_ratings`).get();
+  res.json({today,fleet,drivers,unassigned,upcoming,reviews,peakEnabled:setting('peak_enabled','0')==='1',peakMultiplier:Number(setting('peak_multiplier','1'))||1});
+});
+app.get('/api/admin/reviews', adminOnly, (req,res)=>res.json(db.prepare(`SELECT r.*,b.booking_id,c.name customer_name FROM booking_ratings r JOIN bookings b ON b.id=r.booking_id JOIN customers c ON c.id=b.customer_id ORDER BY r.created_at DESC LIMIT 100`).all()));
+app.get('/api/admin/audit', adminOnly, (req,res)=>res.json(db.prepare('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100').all()));
+app.patch('/api/admin/settings/peak', adminOnly, (req,res)=>{ const enabled=req.body?.enabled?'1':'0', multiplier=Number(req.body?.multiplier); if(enabled==='1' && (!Number.isFinite(multiplier)||multiplier<1||multiplier>3)) return res.status(400).json({error:'Multiplier must be between 1 and 3'}); db.prepare('INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)').run('peak_enabled',enabled); db.prepare('INSERT OR REPLACE INTO app_settings(key,value) VALUES(?,?)').run('peak_multiplier',String(enabled==='1'?multiplier:1)); audit('admin',req.adminEmail,'PEAK_PRICING_UPDATED','settings','peak',`${enabled}:${multiplier}`); res.json({ok:true}); });
 
 // ---------- admin: database backup (no schema/data mutation) ----------
 app.get('/api/admin/backup', adminOnly, (req, res) => {
