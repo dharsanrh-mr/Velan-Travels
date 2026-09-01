@@ -152,3 +152,31 @@ Set the Twilio variables in `backend/.env` and choose `NOTIFY_CHANNEL=sms`, `wha
 - Customer booking history now includes each booking's timeline.
 - Admin dashboard API now exposes today's booking count, today's active/pending count and today's completed revenue.
 - Admin notification endpoint provides the latest timeline events for a notification center.
+
+## Future-ready upgrade (September 2026)
+
+Added without replacing the existing Velan Travels design/logo:
+- Customer: booking receipt/print-to-PDF, completed-trip rating, referral code generation, promo validation, booking timeline/live driver location visibility.
+- Driver: dashboard stats, GPS location sharing, trip navigation and trip status workflow.
+- Admin: Operations Center, fleet/driver availability, peak pricing controls, maintenance logging, promo management, database backup, CSV export, reviews and audit log visibility.
+- Backend: persistent SQLite modules, audit logging, live location storage, promo/discount fields, maintenance tracking and referral storage.
+- Existing responsive/PWA structure remains intact.
+
+Note: SMS/WhatsApp delivery and Google Maps still depend on the corresponding production environment credentials already supported by the project.
+
+## Future Features Implemented in this build
+
+This upgrade keeps the existing Velan Travels UI, logo and booking flow and adds:
+
+- Live driver location sharing from the driver phone, with customer polling and Google Maps location link.
+- Customer trip ratings/reviews after completion.
+- Promo/coupon validation and fare discounts with usage limits/expiry support.
+- Referral-code generation for logged-in customers.
+- Peak-pricing controls and server-side fare multiplier support.
+- Vehicle maintenance records and admin maintenance management.
+- Admin operations dashboard integration, audit logging and reporting hooks.
+- Receipt/print-to-PDF support, FAQ, WhatsApp support and Google review shortcut.
+- Driver dashboard location-sharing control.
+- Database migrations for all new feature tables/fields, preserving existing databases.
+
+The production deployment still needs the relevant external credentials (for example Twilio and Google Maps) if those optional services are enabled. Live driver tracking requires the driver's browser to grant location permission and keep the driver page open.
