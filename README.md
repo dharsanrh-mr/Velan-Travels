@@ -4,6 +4,7 @@ A travel booking system: customer-facing booking site + an admin panel to manage
 
 ## Included
 - Customer website (home, booking form, booking-status lookup)
+- Customer login (mobile number + OTP, no password) with a "My Bookings" history page
 - Unique Booking ID generation
 - Live fare estimate on the booking form (base fare + rate/km, per vehicle)
 - Admin login (hashed passwords, session tokens with 12h expiry)
@@ -37,6 +38,8 @@ Demo admin:
 > **Upgrading again — driver login now requires a PIN.** `drivers.pin_hash` is added automatically to an existing DB on startup (no need to delete it this time). Any driver that doesn't have a PIN yet is auto-assigned one equal to the last 4 digits of their mobile number, and the server logs it on startup — they'll be prompted to change it on their next login (see below).
 
 > **Upgrading again — DB-backed sessions, driver PIN force-change, admin pagination.** All automatic on startup, no need to delete the DB: a `sessions` table replaces the old in-memory session store (admin/driver logins now survive a restart), and `drivers.pin_is_default` is added to track who's still on their auto-assigned default PIN.
+
+> **Upgrading again — customer login (mobile + OTP) and booking history.** An `otps` table is added automatically on startup, no need to delete the DB. Customers log in from "My Bookings" with just their mobile number — the OTP is sent via the same SMS setup used for booking notifications (see below), so nothing to configure separately. With no Twilio credentials, OTPs are printed to the server console instead of sent, same as every other notification in this app.
 
 ## SMS / WhatsApp notifications
 Optional — off by default in the sense that with no Twilio credentials, every notification is just printed to the server console instead of sent, so nothing breaks if you skip this.
@@ -77,6 +80,10 @@ PATCH `/api/admin/settings/password` *(admin)*
 GET `/api/admin/bookings?status=&date=&q=` *(admin)* — paginated (`?limit=&offset=`, default 50/page), total count in `X-Total-Count` header
 PATCH `/api/admin/bookings/:id/status` *(admin)*
 PATCH `/api/admin/bookings/:id/driver` *(admin)*
+POST `/api/customer/otp/request` — send a 6-digit OTP to a mobile number (SMS)
+POST `/api/customer/otp/verify` — verify OTP, returns a customer session token
+POST `/api/customer/logout` *(customer)*
+GET `/api/customer/bookings` *(customer)* — all bookings placed under the logged-in mobile number
 GET `/api/config` — public frontend config (Maps browser key, if set)
 GET `/api/distance?pickup=&drop=` — auto distance calc (Google Distance Matrix)
 POST `/api/driver/login`
