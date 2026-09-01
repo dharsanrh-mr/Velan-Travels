@@ -1,0 +1,10 @@
+{
+  "name":"Velan Travels",
+  "short_name":"Velan Travels",
+  "start_url":"/",
+  "display":"standalone",
+  "background_color":"#ffffff",
+  "theme_color":"#075536",
+  "description":"Safe, reliable and comfortable travel booking with Velan Travels.",
+  "icons":[{"src":"/assets/velan-hero.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}]
+}

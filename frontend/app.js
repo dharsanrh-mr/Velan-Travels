@@ -40,6 +40,51 @@ const todayStr = () => new Date().toISOString().slice(0, 10);
 const money = n => n == null ? '-' : '₹' + Number(n).toLocaleString('en-IN');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// ---------- UI feedback / motion helpers ----------
+function ensureToastRegion() {
+  let region = document.getElementById('vtToastRegion');
+  if (!region) {
+    region = document.createElement('div');
+    region.id = 'vtToastRegion';
+    region.setAttribute('aria-live', 'polite');
+    region.setAttribute('aria-atomic', 'true');
+    document.body.appendChild(region);
+  }
+  return region;
+}
+function toast(message, type = 'success', timeout = 3200) {
+  if (!message) return;
+  const region = ensureToastRegion();
+  const item = document.createElement('div');
+  item.className = `vt-toast ${type}`;
+  const icon = type === 'error' ? '!' : type === 'warning' ? '!' : '✓';
+  item.innerHTML = `<span class="vt-toast-icon">${icon}</span><div class="vt-toast-body">${esc(message)}</div><button class="vt-toast-close" aria-label="Dismiss">×</button>`;
+  const remove = () => { item.style.opacity = '0'; item.style.transform = 'translateY(8px)'; setTimeout(() => item.remove(), 180); };
+  item.querySelector('.vt-toast-close').onclick = remove;
+  region.appendChild(item);
+  if (timeout > 0) setTimeout(remove, timeout);
+}
+function setButtonBusy(btn, busy, busyText = 'Please wait…') {
+  if (!btn) return;
+  if (busy) {
+    btn.dataset.originalText = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = `<span class="vt-spinner" aria-hidden="true"></span>${busyText}`;
+  } else if (btn.dataset.originalText) {
+    btn.disabled = false;
+    btn.innerHTML = btn.dataset.originalText;
+    delete btn.dataset.originalText;
+  }
+}
+function initReveal() {
+  const els = document.querySelectorAll('.card,.section,.grid > .card,.stats-row > .stat-card,.table-wrap');
+  if (!('IntersectionObserver' in window)) return;
+  const io = new IntersectionObserver(entries => entries.forEach(entry => {
+    if (entry.isIntersecting) { entry.target.classList.add('vt-visible'); io.unobserve(entry.target); }
+  }), { threshold: .08 });
+  els.forEach((el, i) => { el.classList.add('vt-reveal'); el.style.transitionDelay = `${Math.min(i * 25, 180)}ms`; io.observe(el); });
+}
+
 // ---------------- Google Maps: auto distance calc (optional) ----------------
 // Loads config once, lazily injects the Places script only if a browser key
 // is configured, and hooks up autocomplete + auto distance-fill on the
@@ -196,6 +241,7 @@ function shell(content, { admin = false, activeNav = '' } = {}) {
     a.onclick = a.onclick || (() => nav.classList.remove('open'));
   });
   nav.querySelectorAll('a').forEach(a => a.addEventListener('click', () => nav.classList.remove('open')));
+  requestAnimationFrame(initReveal);
 }
 function loading(admin = false) { shell('<p class="loading">Loading…</p>', { admin }); }
 
@@ -235,13 +281,13 @@ function home() {
         <div class="booking-badge">QUICK BOOKING</div>
         <h2>Plan your next trip</h2>
         <p class="booking-sub">Get started in a few simple steps.</p>
-        <form id="qbf" class="field-grid" style="margin-top:16px">
+        <form id="qbfHero" class="field-grid" style="margin-top:16px">
           <div class="field"><label>Pickup Location</label><input name="pickup" placeholder="Where are you starting?" required></div>
           <div class="field"><label>Drop Location</label><input name="drop" placeholder="Where are you going?" required></div>
           <div class="field"><label>Date</label><input type="date" name="date" min="${todayStr()}" required></div>
           <div class="field"><label>Time</label><input type="time" name="time" required></div>
         </form>
-        <button form="qbf" class="btn block hero-book-btn">Search Available Vehicles <span>→</span></button>
+        <button form="qbfHero" class="btn block hero-book-btn">Search Available Vehicles <span>→</span></button>
         <div class="booking-note">✓ Instant enquiry &nbsp; • &nbsp; ✓ No hidden charges</div>
       </div>
     </div>
@@ -296,13 +342,15 @@ function home() {
   </section>
   `, { activeNav: '' });
 
-  document.getElementById('qbf').onsubmit = e => {
+  const startBooking = e => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
     wz = { pickup: f.pickup, drop: f.drop, date: f.date, time: f.time };
     wzStep = 1;
     location.hash = 'book';
   };
+  document.querySelectorAll('#qbfHero, #qbf').forEach(form => form.onsubmit = startBooking);
+  initReveal();
 }
 
 // ---------------- Customer: Booking Wizard ----------------
@@ -487,6 +535,7 @@ async function renderWizardStep3() {
       const r = await api('/api/bookings', { method: 'POST', body: JSON.stringify(wz) });
       wzResult = r;
       wzStep = 4;
+      toast('Booking submitted successfully. Confirmation details are ready.');
       booking();
     } catch (x) {
       document.getElementById('s3err').textContent = x.message;
@@ -557,6 +606,16 @@ function status() {
   }
 }
 
+function statusTimeline(current) {
+  const steps = [
+    ['PENDING','Booking Received'],['CONFIRMED','Confirmed'],['DRIVER_ASSIGNED','Driver Assigned'],['ON_TRIP','On Trip'],['COMPLETED','Completed']
+  ];
+  const order = Object.fromEntries(steps.map((x,i)=>[x[0],i]));
+  const active = order[current] ?? -1;
+  if (current === 'CANCELLED') return `<div class="vt-timeline cancelled"><div class="vt-timeline-title">Booking Cancelled</div><div class="vt-timeline-line"><span class="done"></span><span class="cancel-dot">×</span></div><small>The booking is no longer active.</small></div>`;
+  return `<div class="vt-timeline"><div class="vt-timeline-title">Trip Progress</div><div class="vt-timeline-track">${steps.map((x,i)=>`<div class="vt-step ${i<active?'done':''} ${i===active?'current':''}"><span>${i<active?'✓':i===active?'•':i+1}</span><small>${x[1]}</small></div>`).join('')}</div></div>`;
+}
+
 async function loadBookingCard(id) {
   const sr = document.getElementById('sr');
   if (!sr) return;
@@ -570,6 +629,7 @@ async function loadBookingCard(id) {
         <h2 style="margin:0">${esc(r.booking_id)}</h2>
         <span class="status-pill status-${r.status}">${r.status.replaceAll('_', ' ')}</span>
       </div>
+      ${statusTimeline(r.status)}
       <div class="summary-card" style="margin-top:10px">
         <div class="row"><span>Customer</span><b>${esc(r.customer_name)} · ${esc(r.mobile)}</b></div>
         <div class="row"><span>Route</span><b>${esc(r.pickup_location)} → ${esc(r.drop_location)}</b></div>
@@ -580,7 +640,7 @@ async function loadBookingCard(id) {
         ${r.estimated_fare ? `<div class="row"><span>Estimated Fare</span><b>${money(r.estimated_fare)}</b></div>` : ''}
       </div>
       <div class="no-print">
-        <button class="btn secondary" onclick="window.print()">Print</button>
+        <button class="btn secondary" onclick="window.print()">Print / Save PDF</button>
         ${canEdit ? `<button class="btn secondary" id="editBtn">Edit Booking</button>` : ''}
         ${canCancel ? `<button class="btn danger" id="cancelBtn">Cancel Booking</button>` : ''}
       </div>
@@ -930,7 +990,10 @@ async function dashboard() {
         const matches = await api('/api/admin/bookings?q=' + encodeURIComponent(f.bookingId.trim()));
         const match = matches.find(b => b.booking_id.toUpperCase() === f.bookingId.trim().toUpperCase());
         if (!match) { errEl.textContent = 'No booking found with that ID'; return; }
+        const btn = e.target.querySelector('button[type="submit"]');
+        setButtonBusy(btn, true, 'Updating…');
         await api('/api/admin/bookings/' + match.id + '/status', { method: 'PATCH', body: JSON.stringify({ status: f.status }) });
+        toast('Booking status updated successfully.');
         dashboard();
       } catch (x) { errEl.textContent = x.message; }
     };
@@ -1265,8 +1328,9 @@ async function driverTrips() {
         <button class="btn secondary" id="driverLogoutBtn">Logout</button>
       </div>
     </div>
+    <div class="vt-driver-tools"><button class="btn secondary" id="todayTripsBtn">Today</button><button class="btn secondary" id="allTripsBtn">All Trips</button><span id="driverTripCount" class="muted"></span></div>
     <div class="grid" style="padding:0">
-    ${trips.length ? trips.map(t => `<div class="card">
+    ${trips.length ? trips.map(t => `<div class="card driver-trip-card" data-trip-date="${esc(t.journey_date)}">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <h2>${esc(t.booking_id)}</h2>
           <span class="status-pill status-${t.status}">${t.status.replaceAll('_', ' ')}</span>
@@ -1275,12 +1339,16 @@ async function driverTrips() {
         <p style="color:var(--muted)">${esc(t.journey_date)} · ${esc(t.journey_time)}</p>
         <p>${esc(t.customer_name)} · ${esc(t.mobile)}</p>
         <p style="color:var(--muted)">${esc(t.vehicle_name || '-')} · ${t.passengers} passengers</p>
-        ${DRIVER_NEXT_STATUS[t.status] ? `<button class="btn" style="margin-top:8px" onclick="updateTripStatus(${t.id})">${DRIVER_NEXT_LABEL[t.status]}</button>` : ''}
+        <div class="trip-actions"><a class="btn secondary" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.pickup_location)}">Navigate</a>${DRIVER_NEXT_STATUS[t.status] ? `<button class="btn" onclick="updateTripStatus(${t.id})">${DRIVER_NEXT_LABEL[t.status]}</button>` : ''}</div>
       </div>`).join('') : '<p class="empty">No trips assigned yet.</p>'}
     </div></section>`);
     document.getElementById('driverLogoutBtn').onclick = () => {
       driverToken = ''; driverName = ''; location.hash = ''; router();
     };
+    const tripCards = [...document.querySelectorAll('.driver-trip-card')];
+    const countEl = document.getElementById('driverTripCount');
+    const applyTripFilter = (todayOnly) => { const today=todayStr(); let shown=0; tripCards.forEach(c=>{ const show=!todayOnly || c.dataset.tripDate===today; c.style.display=show?'':'none'; if(show) shown++; }); if(countEl) countEl.textContent=`${shown} trip${shown===1?'':'s'} shown`; };
+    document.getElementById('todayTripsBtn').onclick=()=>applyTripFilter(true); document.getElementById('allTripsBtn').onclick=()=>applyTripFilter(false); applyTripFilter(false);
     document.getElementById('driverChangePinBtn').onclick = () => driverForcePinChange();
   } catch (x) {
     driverToken = ''; driverLogin();
@@ -1295,8 +1363,9 @@ async function updateTripStatus(bookingId) {
   if (!next) return;
   try {
     await driverApi(`/api/driver/bookings/${bookingId}/status`, { method: 'PATCH', body: JSON.stringify({ status: next }) });
+    toast('Trip status updated successfully.');
     driverTrips();
-  } catch (x) { alert(x.message); }
+  } catch (x) { toast(x.message, 'error'); }
 }
 
 // ---------------- Admin: Customers ----------------
@@ -1355,6 +1424,7 @@ async function settingsPage() {
       await api('/api/admin/settings/password', { method: 'PATCH', body: JSON.stringify(Object.fromEntries(new FormData(e.target))) });
       msgEl.style.color = 'var(--green)';
       msgEl.textContent = 'Password updated successfully.';
+      toast('Admin password updated successfully.');
       e.target.reset();
     } catch (x) {
       msgEl.style.color = 'var(--danger)';
