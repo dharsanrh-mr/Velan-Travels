@@ -965,6 +965,19 @@ app.patch('/api/admin/settings/password', adminOnly, (req, res) => {
 app.patch('/api/admin/bookings/:id/status', adminOnly, (req, res) => {
   const allowed = ['PENDING', 'CONFIRMED', 'DRIVER_ASSIGNED', 'ON_TRIP', 'COMPLETED', 'CANCELLED'];
   if (!allowed.includes(req.body.status)) return res.status(400).json({ error: 'Invalid status' });
+  // Statuses that imply a driver is on the job. Setting one of these via the
+  // status dropdown (instead of the Driver dropdown, which sets driver_id)
+  // used to leave driver_id NULL — the booking looked assigned everywhere
+  // in the admin UI, but the driver's own "My Trips" list (filtered by
+  // driver_id) would never show it. Require driver_id to already be set.
+  const DRIVER_REQUIRED_STATUSES = ['DRIVER_ASSIGNED', 'ON_TRIP', 'COMPLETED'];
+  if (DRIVER_REQUIRED_STATUSES.includes(req.body.status)) {
+    const booking = db.prepare('SELECT driver_id FROM bookings WHERE id=?').get(req.params.id);
+    if (!booking) return res.status(404).json({ error: 'Booking not found' });
+    if (!booking.driver_id) {
+      return res.status(400).json({ error: `Assign a driver first using the Driver dropdown before setting status to ${req.body.status.replaceAll('_', ' ')}.` });
+    }
+  }
   db.prepare('UPDATE bookings SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?')
     .run(req.body.status, req.params.id);
   recordBookingEvent(req.params.id, 'STATUS_CHANGED', `Status changed to ${req.body.status.replaceAll('_', ' ')}`);
