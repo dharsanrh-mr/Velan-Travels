@@ -921,6 +921,11 @@ async function dashboard() {
         <div class="stat-card completed"><small>Completed</small><b>${c.COMPLETED}</b></div>
         <div class="stat-card cancelled"><small>Cancelled</small><b>${c.CANCELLED}</b></div>
       </div>
+      <div class="stats-row" style="margin-top:0">
+        <div class="stat-card"><small>Today's Trips</small><b>${c.TODAY || 0}</b></div>
+        <div class="stat-card pending"><small>Today's Active</small><b>${c.TODAY_PENDING || 0}</b></div>
+        <div class="stat-card completed"><small>Today's Revenue</small><b>${money(c.TODAY_REVENUE || 0)}</b></div>
+      </div>
       <div class="dash-grid">
         <div class="card">
           <div style="display:flex;justify-content:space-between;align-items:center">
