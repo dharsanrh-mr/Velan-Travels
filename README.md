@@ -124,3 +124,22 @@ Whichever host you pick, remember the in-memory session store note below — a r
 - ~~Consider rate-limiting `/api/auth/login` and `/api/driver/login`~~ — done: both are capped at 8 attempts per 15 minutes per IP+identifier, returning 429 with a `Retry-After` header once exceeded. It's in-memory (resets on restart) — fine for a single instance; swap for a Redis-backed limiter if you scale out.
 - ~~Admin-set driver PINs currently have no format check beyond 4–6 digits — consider forcing drivers to change the default (last-4-of-mobile) PIN on first login~~ — done: `drivers.pin_is_default` tracks this, `/api/driver/login` returns `pinIsDefault: true` when it applies, and the driver app forces a PIN-change screen before showing trips. Drivers can also change their PIN anytime from the "Change PIN" button on their trips dashboard.
 - ~~`/api/admin/bookings` and `/api/admin/customers` are capped at 500 rows per request... current admin UI doesn't have pagination controls yet~~ — done: both endpoints now default to 50 rows/page (still cap at 500 via `?limit=`) and return an `X-Total-Count` header; the Bookings and Customers admin pages have Prev/Next controls.
+
+## Production UI, Maps, Notifications & Security
+
+This build keeps the existing booking/database model and adds a visual polish layer, responsive admin styling, Google Maps autocomplete/distance support, and SMS/WhatsApp notification support without changing existing booking records.
+
+### Google Maps
+Set `GOOGLE_MAPS_BROWSER_KEY` and `GOOGLE_MAPS_SERVER_KEY` in `backend/.env`. Restrict the browser key by website referrer and the server key by server/IP. Enable Places API and Distance Matrix API.
+
+### SMS / WhatsApp
+Set the Twilio variables in `backend/.env` and choose `NOTIFY_CHANNEL=sms`, `whatsapp`, `both`, or `off`. Without Twilio credentials, messages are logged instead of sent so development still works.
+
+### Production security
+- Security headers and a Content Security Policy are enabled by default.
+- Cross-origin API access is blocked unless exact origins are listed in `CORS_ORIGINS`.
+- Public booking and distance endpoints have lightweight rate limiting; login/OTP endpoints keep their stricter limiter.
+- JSON request bodies are capped at 64 KB.
+- Admin sessions are revoked after a password change.
+- Expired sessions are periodically cleaned from SQLite.
+- Set `TRUST_PROXY=1` only when the app is behind one trusted reverse proxy.
