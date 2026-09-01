@@ -226,7 +226,7 @@ function shell(content, { admin = false, activeNav = '' } = {}) {
   <footer>
     <div class="wrap" style="text-align:left;display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:20px;padding-bottom:16px">
       <div><b style="color:#fff">VELAN TRAVELS</b><p style="margin-top:8px;font-size:12.5px">Safe, reliable and always with you — for every journey, big or small.</p></div>
-      <div><b style="color:#fff">Customers</b><p style="margin-top:8px"><a href="#book" style="display:block;padding:3px 0">Book a Trip</a><a href="#status" style="display:block;padding:3px 0">Check Booking Status</a><a href="#my-bookings" style="display:block;padding:3px 0">My Bookings</a></p></div>
+      <div><b style="color:#fff">Customers</b><p style="margin-top:8px"><a href="#book" style="display:block;padding:3px 0">Book a Trip</a><a href="#status" style="display:block;padding:3px 0">Check Booking Status</a><a href="#faq" style="display:block;padding:3px 0">FAQ</a><a href="#my-bookings" style="display:block;padding:3px 0">My Bookings</a></p></div>
       <div><b style="color:#fff">Partners</b><p style="margin-top:8px"><a href="#driver" style="display:block;padding:3px 0">Driver Login</a><a href="#admin" style="display:block;padding:3px 0">Admin Login</a></p></div>
       <div><b style="color:#fff">Contact</b><p style="margin-top:8px;font-size:12.5px">+91 96552 13027<br>info@velantravels.com</p></div>
     </div>
@@ -334,10 +334,19 @@ function home() {
       </div>
     </div>
   </section>
+  <section class="section" id="faq" style="padding-top:0">
+    <div class="card" style="max-width:1136px;margin:0 auto">
+      <h2>Frequently Asked Questions</h2>
+      <details><summary>Can I cancel or reschedule?</summary><p>You can edit eligible bookings or cancel them from Check Booking Status.</p></details>
+      <details><summary>Will I get the driver's details?</summary><p>Once a driver is assigned, their name and contact details appear in your booking status.</p></details>
+      <details><summary>Can I track my driver?</summary><p>Yes. During an active assigned trip, use Live Driver from the booking status page when the driver is sharing location.</p></details>
+    </div>
+  </section>
   <section class="section" id="contact" style="padding-top:0">
     <div class="card" style="max-width:1136px;margin:0 auto">
       <h2>Contact Us</h2>
       <p style="color:var(--muted)">${ICON.phone} &nbsp;+91 96552 13027 &nbsp;·&nbsp; info@velantravels.com</p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px"><a class="btn" href="https://wa.me/919655213027" target="_blank" rel="noopener">WhatsApp Support</a><a class="btn secondary" href="https://www.google.com/search?q=Velan+Travels+reviews" target="_blank" rel="noopener">Leave a Google Review</a></div>
     </div>
   </section>
   `, { activeNav: '' });
@@ -505,6 +514,7 @@ async function renderWizardStep3() {
           <div class="field"><label>Full Name</label><input name="name" value="${esc(wz.name || '')}" placeholder="Enter your name" required></div>
           <div class="field"><label>Phone Number</label><input name="mobile" value="${esc(wz.mobile || '')}" placeholder="10-digit mobile number" pattern="[6-9][0-9]{9}" required></div>
           <div class="field"><label>No. of Passengers</label><input type="number" min="1" name="passengers" value="${esc(wz.passengers || '')}" placeholder="Number of passengers" required></div>
+          <div class="field"><label>Promo Code (optional)</label><div style="display:flex;gap:8px"><input name="promoCode" value="${esc(wz.promoCode || '')}" placeholder="SAVE10" style="flex:1"><button type="button" class="btn secondary" id="promoBtn">Apply</button></div><small id="promoMsg" style="color:var(--muted)"></small></div>
           <div class="field"><label>Additional Notes (optional)</label><textarea name="requirements" placeholder="Any special requests">${esc(wz.requirements || '')}</textarea></div>
           <p id="s3err" class="error"></p>
         </form>
@@ -541,6 +551,11 @@ async function renderWizardStep3() {
       document.getElementById('s3err').textContent = x.message;
       btn.disabled = false; btn.textContent = 'Confirm Booking';
     }
+  };
+  document.getElementById('promoBtn').onclick = async () => {
+    const code = document.querySelector('[name=promoCode]').value.trim();
+    const msg = document.getElementById('promoMsg'); if (!code) { msg.textContent='Enter a promo code'; return; }
+    try { const r = await api(`/api/promos/validate?code=${encodeURIComponent(code)}&fare=${encodeURIComponent(fare || 0)}`); wz.promoCode = r.code; msg.style.color='var(--green)'; msg.textContent=`Applied: ${money(r.amount)} off`; } catch(e) { msg.style.color='var(--danger)'; msg.textContent=e.message; }
   };
 }
 
@@ -616,6 +631,34 @@ function statusTimeline(current) {
   return `<div class="vt-timeline"><div class="vt-timeline-title">Trip Progress</div><div class="vt-timeline-track">${steps.map((x,i)=>`<div class="vt-step ${i<active?'done':''} ${i===active?'current':''}"><span>${i<active?'✓':i===active?'•':i+1}</span><small>${x[1]}</small></div>`).join('')}</div></div>`;
 }
 
+async function startRazorpayPayment(bookingId) {
+  try {
+    const cfg=await customerApi('/api/customer/payments/config');
+    if(!cfg.enabled) { toast('Online payment is not configured yet.','warning'); return; }
+    if(!window.Razorpay) {
+      await new Promise((resolve,reject)=>{
+        const s=document.createElement('script'); s.src='https://checkout.razorpay.com/v1/checkout.js';
+        s.onload=resolve; s.onerror=()=>reject(new Error('Payment checkout could not load')); document.head.appendChild(s);
+      });
+    }
+    const order=await customerApi('/api/customer/payments/order',{method:'POST',body:JSON.stringify({bookingId})});
+    const rzp=new Razorpay({
+      key:order.keyId, amount:order.amount, currency:order.currency, name:'Velan Travels',
+      description:`Booking ${bookingId}`, order_id:order.orderId,
+      handler:async response=>{
+        try {
+          await customerApi('/api/customer/payments/verify',{method:'POST',body:JSON.stringify({bookingId,...response})});
+          toast('Payment successful ✓');
+          loadBookingCard(bookingId);
+        } catch(e) { toast(e.message,'error'); }
+      },
+      theme:{color:'#075536'}
+    });
+    rzp.on('payment.failed',()=>toast('Payment was not completed. You can try again.','warning'));
+    rzp.open();
+  } catch(e) { toast(e.message,'error'); }
+}
+
 async function loadBookingCard(id) {
   const sr = document.getElementById('sr');
   if (!sr) return;
@@ -636,23 +679,48 @@ async function loadBookingCard(id) {
         <div class="row"><span>Date &amp; Time</span><b>${esc(r.journey_date)} · ${esc(r.journey_time)}</b></div>
         <div class="row"><span>Passengers</span><b>${r.passengers}</b></div>
         ${r.vehicle_name ? `<div class="row"><span>Vehicle</span><b>${esc(r.vehicle_name)}</b></div>` : ''}
-        ${r.driver_name ? `<div class="row"><span>Driver</span><b>${esc(r.driver_name)} · ${esc(r.driver_mobile)}</b></div>` : ''}
+        ${r.driver_name ? `<div class="row"><span>Driver</span><b>${esc(r.driver_name)} · ${esc(r.driver_mobile)}</b></div>` : ''}${r.driver_latitude != null && r.driver_longitude != null ? `<div class="row"><span>Live Location</span><a class="btn secondary" target="_blank" rel="noopener" href="https://www.google.com/maps?q=${r.driver_latitude},${r.driver_longitude}">View Driver Location</a></div>` : ''}
         ${r.estimated_fare ? `<div class="row"><span>Estimated Fare</span><b>${money(r.estimated_fare)}</b></div>` : ''}
       </div>
       <div class="no-print">
         <button class="btn secondary" onclick="window.print()">Print / Save PDF</button>
         ${canEdit ? `<button class="btn secondary" id="editBtn">Edit Booking</button>` : ''}
         ${canCancel ? `<button class="btn danger" id="cancelBtn">Cancel Booking</button>` : ''}
+        ${r.driver_name && ['DRIVER_ASSIGNED','ON_TRIP'].includes(r.status) ? `<button class="btn secondary" id="trackBtn">Live Driver</button>` : ''}
+        ${r.status === 'COMPLETED' ? `<button class="btn secondary" id="rateBtn">Rate Trip</button>` : ''}
+        ${r.estimated_fare && r.payment_status !== 'PAID' && r.status !== 'CANCELLED' ? `<button class="btn" id="payBtn">Pay ${money(r.estimated_fare)}</button>` : ''}
+        ${r.payment_status === 'PAID' ? `<span class="status-pill status-CONFIRMED">PAID</span>` : ''}
+        <button class="btn secondary" id="waShareBtn">Share on WhatsApp</button>
       </div>
+      <div id="liveArea"></div>
       <div id="editArea"></div>
     </div>`;
     const editBtn = document.getElementById('editBtn');
     if (editBtn) editBtn.onclick = () => showEditForm(r);
     const cancelBtn = document.getElementById('cancelBtn');
     if (cancelBtn) cancelBtn.onclick = () => showCancelConfirm(r);
+    const trackBtn=document.getElementById('trackBtn'); if(trackBtn) trackBtn.onclick=()=>startLiveTracking(r.booking_id);
+    const rateBtn=document.getElementById('rateBtn'); if(rateBtn) rateBtn.onclick=()=>showRatingForm(r.booking_id);
+    const payBtn=document.getElementById('payBtn'); if(payBtn) payBtn.onclick=()=>startRazorpayPayment(r.booking_id);
+    const waBtn=document.getElementById('waShareBtn'); if(waBtn) waBtn.onclick=()=>{
+      const text=`Velan Travels Booking ${r.booking_id}\n${r.pickup_location} → ${r.drop_location}\n${r.journey_date} ${r.journey_time}\nStatus: ${String(r.status).replaceAll('_',' ')}`;
+      window.open('https://wa.me/?text='+encodeURIComponent(text),'_blank','noopener');
+    };
   } catch (x) {
     sr.innerHTML = `<p class="error">${esc(x.message)}</p>`;
   }
+}
+
+function startLiveTracking(bookingId) {
+  const area=document.getElementById('liveArea'); if(!area) return;
+  let timer=null;
+  const poll=async()=>{ try { const r=await api(`/api/bookings/${encodeURIComponent(bookingId)}/live`); if(r.latitude==null){ area.innerHTML='<div class="card" style="margin-top:12px"><b>Live Driver Tracking</b><p style="color:var(--muted)">Driver location is not available yet.</p></div>'; return; } const maps=`https://www.google.com/maps/search/?api=1&query=${r.latitude},${r.longitude}`; area.innerHTML=`<div class="card" style="margin-top:12px"><b>Live Driver Tracking</b><p style="margin:6px 0">${esc(r.driver_name||'Driver')} · Updated ${esc(r.updated_at||'now')}</p><a class="btn secondary" target="_blank" rel="noopener" href="${maps}">Open Driver Location</a></div>`; } catch(e){} };
+  poll(); timer=setInterval(poll,15000); setTimeout(()=>clearInterval(timer),10*60*1000);
+}
+function showRatingForm(bookingId){
+  const area=document.getElementById('liveArea'); if(!area)return;
+  area.innerHTML=`<form id="ratingForm" class="card" style="margin-top:12px"><b>Rate your trip</b><div class="field" style="margin-top:10px"><label>Rating</label><select name="rating"><option value="5">★★★★★</option><option value="4">★★★★☆</option><option value="3">★★★☆☆</option><option value="2">★★☆☆☆</option><option value="1">★☆☆☆☆</option></select></div><div class="field"><label>Review (optional)</label><textarea name="review" maxlength="1000" placeholder="How was your experience?"></textarea></div><button class="btn">Submit Review</button><p id="rateErr" class="error"></p></form>`;
+  document.getElementById('ratingForm').onsubmit=async e=>{e.preventDefault();try{await customerApi(`/api/customer/bookings/${encodeURIComponent(bookingId)}/rating`,{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Thank you for your feedback!');area.innerHTML='<p style="color:var(--green)">Thanks — your review was submitted.</p>';}catch(x){document.getElementById('rateErr').textContent=x.message;}};
 }
 
 function showCancelConfirm(r) {
@@ -813,7 +881,7 @@ async function myBookings() {
         <button type="button" class="btn secondary" id="clOut">Logout</button>
       </div>
     </div>
-    <p style="color:var(--muted)">${esc(customerMobile)}</p>
+    <p style="color:var(--muted)">${esc(customerMobile)}</p><div class="card" style="margin-top:12px;padding:14px"><b>Refer & Earn</b><p style="color:var(--muted);font-size:13px;margin:5px 0">Share your personal referral code with friends.</p><button class="btn secondary" id="refBtn">Get Referral Code</button><span id="refCode" style="margin-left:10px;font-weight:800"></span></div>
     <div id="mbList" style="margin-top:18px;display:flex;flex-direction:column;gap:12px">
       ${rows.length ? rows.map(r => `
         <div class="card mb-item" data-id="${esc(r.booking_id)}" style="cursor:pointer">
@@ -823,14 +891,23 @@ async function myBookings() {
           </div>
           <p style="margin:6px 0 0;color:var(--muted)">${esc(r.pickup_location)} → ${esc(r.drop_location)}</p>
           <p style="margin:2px 0 0;color:var(--muted);font-size:13px">${esc(r.journey_date)} · ${esc(r.journey_time)}${r.vehicle_name ? ' · ' + esc(r.vehicle_name) : ''}${r.estimated_fare ? ' · ' + money(r.estimated_fare) : ''}</p>
+          <div class="no-print" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+            <button class="btn secondary mb-view" data-id="${esc(r.booking_id)}">View / Track</button>
+            <button class="btn secondary mb-receipt" data-id="${esc(r.booking_id)}">Receipt</button>
+            ${r.status === 'COMPLETED' ? `<button class="btn mb-review" data-id="${esc(r.booking_id)}">Rate Trip</button>` : ''}
+          </div>
         </div>`).join('')
         : '<p style="color:var(--muted)">No bookings found for this mobile number yet.</p>'}
     </div>
   </section>`, { activeNav: 'my-bookings' });
   document.getElementById('clOut').onclick = () => { customerLogout(); location.hash = ''; };
-  document.querySelectorAll('.mb-item').forEach(el => {
-    el.onclick = () => { pendingStatusLookup = el.dataset.id; location.hash = 'status'; };
+  document.getElementById('refBtn').onclick=async()=>{try{const r=await customerApi('/api/customer/referrals',{method:'POST',body:'{}'});document.getElementById('refCode').textContent=r.code;navigator.clipboard?.writeText(r.code).catch(()=>{});toast('Referral code copied');}catch(e){toast(e.message,'error');}};
+  document.querySelectorAll('.mb-view').forEach(el => el.onclick = (e) => { e.stopPropagation(); pendingStatusLookup = el.dataset.id; location.hash = 'status'; });
+  document.querySelectorAll('.mb-receipt').forEach(el => el.onclick = async (e) => {
+    e.stopPropagation(); try { const r=await customerApi('/api/customer/bookings/'+encodeURIComponent(el.dataset.id)+'/receipt'); printReceipt(r); } catch(x){toast(x.message,'error');}
   });
+  document.querySelectorAll('.mb-review').forEach(el => el.onclick = (e) => { e.stopPropagation(); showReviewForm(el.dataset.id); });
+  document.querySelectorAll('.mb-item').forEach(el => { el.onclick = () => { pendingStatusLookup = el.dataset.id; location.hash = 'status'; }; });
 }
 
 // ---------------- Admin: Login ----------------
@@ -870,6 +947,11 @@ function adminShell(active, title, bodyHtml) {
       <a href="#customers" class="${active === 'customers' ? 'active' : ''}">${ICON.users} Customers</a>
       <a href="#drivers" class="${active === 'drivers' ? 'active' : ''}">${ICON.user} Drivers</a>
       <a href="#analytics" class="${active === 'analytics' ? 'active' : ''}">${ICON.chart} Reports</a>
+      <a href="#calendar" class="${active === 'calendar' ? 'active' : ''}">${ICON.book} Calendar</a>
+      <a href="#maintenance" class="${active === 'maintenance' ? 'active' : ''}">${ICON.gear} Maintenance</a>
+      <a href="#promos" class="${active === 'promos' ? 'active' : ''}">${ICON.check} Promos</a>
+      <a href="#audit" class="${active === 'audit' ? 'active' : ''}">${ICON.eye} Audit Log</a>
+      <a href="#operations" class="${active === 'operations' ? 'active' : ''}">${ICON.truck} Operations</a>
       <a href="#settings" class="${active === 'settings' ? 'active' : ''}">${ICON.gear} Settings</a>
       <a href="#logout" style="margin-top:auto">${ICON.logout} Logout</a>
     </aside>
@@ -877,7 +959,7 @@ function adminShell(active, title, bodyHtml) {
       <div class="admin-topbar">
         <h1>${title}</h1>
         <div class="admin-user">
-          <button class="bell-btn" title="Notifications">${ICON.bell}</button>
+          <button class="bell-btn" id="adminBell" title="Notifications">${ICON.bell}<span id="adminBellDot" style="display:none;position:absolute;width:8px;height:8px;border-radius:50%;background:var(--danger);top:5px;right:5px"></span></button>
           <div class="avatar">A</div>
           <div class="admin-user-text"><b>Admin</b><small>Administrator</small></div>
         </div>
@@ -1325,14 +1407,16 @@ async function driverTrips() {
   loading();
   try {
     const trips = await driverApi('/api/driver/bookings');
+    const stats = await driverApi('/api/driver/dashboard').catch(() => ({totalTrips:0,completedTrips:0,todayTrips:0,grossRevenue:0}));
     shell(`<section class="page">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
       <h1 style="margin:0">My Trips${driverName ? ' — ' + esc(driverName) : ''}</h1>
       <div style="display:flex;gap:8px">
-        <button class="btn secondary" id="driverChangePinBtn">Change PIN</button>
+        <button class="btn secondary" id="shareLocationBtn">Share Location</button><button class="btn secondary" id="driverChangePinBtn">Change PIN</button>
         <button class="btn secondary" id="driverLogoutBtn">Logout</button>
       </div>
     </div>
+    <div class="stats-row" style="grid-template-columns:repeat(4,1fr);margin-bottom:16px"><div class="stat-card"><small>Total Trips</small><b>${stats.totalTrips||0}</b></div><div class="stat-card"><small>Completed</small><b>${stats.completedTrips||0}</b></div><div class="stat-card"><small>Today</small><b>${stats.todayTrips||0}</b></div><div class="stat-card"><small>Gross Revenue</small><b>${money(stats.grossRevenue||0)}</b></div></div>
     <div class="vt-driver-tools"><button class="btn secondary" id="todayTripsBtn">Today</button><button class="btn secondary" id="allTripsBtn">All Trips</button><span id="driverTripCount" class="muted"></span></div>
     <div class="grid" style="padding:0">
     ${trips.length ? trips.map(t => `<div class="card driver-trip-card" data-trip-date="${esc(t.journey_date)}">
@@ -1344,7 +1428,7 @@ async function driverTrips() {
         <p style="color:var(--muted)">${esc(t.journey_date)} · ${esc(t.journey_time)}</p>
         <p>${esc(t.customer_name)} · ${esc(t.mobile)}</p>
         <p style="color:var(--muted)">${esc(t.vehicle_name || '-')} · ${t.passengers} passengers</p>
-        <div class="trip-actions"><a class="btn secondary" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.pickup_location)}">Navigate</a>${DRIVER_NEXT_STATUS[t.status] ? `<button class="btn" onclick="updateTripStatus(${t.id})">${DRIVER_NEXT_LABEL[t.status]}</button>` : ''}</div>
+        <div class="trip-actions"><a class="btn secondary" target="_blank" rel="noopener" href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.pickup_location)}">Navigate</a><button class="btn secondary share-location" data-id="${t.id}">Share Location</button>${DRIVER_NEXT_STATUS[t.status] ? `<button class="btn" onclick="updateTripStatus(${t.id})">${DRIVER_NEXT_LABEL[t.status]}</button>` : ''}</div>
       </div>`).join('') : '<p class="empty">No trips assigned yet.</p>'}
     </div></section>`);
     document.getElementById('driverLogoutBtn').onclick = () => {
@@ -1354,10 +1438,21 @@ async function driverTrips() {
     const countEl = document.getElementById('driverTripCount');
     const applyTripFilter = (todayOnly) => { const today=todayStr(); let shown=0; tripCards.forEach(c=>{ const show=!todayOnly || c.dataset.tripDate===today; c.style.display=show?'':'none'; if(show) shown++; }); if(countEl) countEl.textContent=`${shown} trip${shown===1?'':'s'} shown`; };
     document.getElementById('todayTripsBtn').onclick=()=>applyTripFilter(true); document.getElementById('allTripsBtn').onclick=()=>applyTripFilter(false); applyTripFilter(false);
+    document.querySelectorAll('.share-location').forEach(btn=>btn.onclick=()=>{ if(!navigator.geolocation)return toast('Location is not supported on this device.','error'); navigator.geolocation.getCurrentPosition(async pos=>{try{await driverApi('/api/driver/location',{method:'PATCH',body:JSON.stringify({latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:pos.coords.accuracy})});toast('Live location shared with the booking system.');}catch(x){toast(x.message,'error');}},()=>toast('Please allow location access to share your position.','warning'),{enableHighAccuracy:true,timeout:10000,maximumAge:30000}); });
     document.getElementById('driverChangePinBtn').onclick = () => driverForcePinChange();
+    document.getElementById('shareLocationBtn').onclick = () => startDriverLocationSharing();
   } catch (x) {
     driverToken = ''; driverLogin();
   }
+}
+
+function startDriverLocationSharing(){
+  if(!navigator.geolocation){toast('Location is not supported on this device','error');return;}
+  toast('Location sharing started. Keep this page open during trips.');
+  const send=pos=>driverApi('/api/driver/location',{method:'PATCH',body:JSON.stringify({latitude:pos.coords.latitude,longitude:pos.coords.longitude,accuracy:pos.coords.accuracy})}).catch(()=>{});
+  navigator.geolocation.getCurrentPosition(send,()=>toast('Please allow location access','error'),{enableHighAccuracy:true});
+  if(window.__vtWatchId) navigator.geolocation.clearWatch(window.__vtWatchId);
+  window.__vtWatchId=navigator.geolocation.watchPosition(send,()=>{}, {enableHighAccuracy:true,maximumAge:10000,timeout:15000});
 }
 
 async function updateTripStatus(bookingId) {
@@ -1412,6 +1507,11 @@ async function customers(filters = {}, offset = 0) {
 async function settingsPage() {
   loading(true);
   adminShell('settings', 'Settings', `
+  <div class="card" style="max-width:480px;margin-bottom:16px">
+    <h2>Peak Pricing</h2>
+    <p style="color:var(--muted);font-size:13px">Set a temporary fare multiplier from 1× to 3×. The booking API applies it automatically.</p>
+    <form id="pricingForm" style="display:flex;gap:10px;align-items:end;margin-top:12px"><div class="field" style="flex:1"><label>Multiplier</label><input id="peakMultiplier" name="peakMultiplier" type="number" min="1" max="3" step="0.1" value="1"></div><button class="btn">Save</button></form><p id="pricingMsg" class="error"></p>
+  </div>
   <div class="card" style="max-width:480px">
     <h2>Change Password</h2>
     <form id="pwForm" style="display:flex;flex-direction:column;gap:14px;margin-top:12px">
@@ -1421,6 +1521,8 @@ async function settingsPage() {
       <p id="pwMsg" class="error"></p>
     </form>
   </div>`);
+  api('/api/pricing').then(r=>{document.getElementById('peakMultiplier').value=r.peakMultiplier||1;}).catch(()=>{});
+  document.getElementById('pricingForm').onsubmit=async e=>{e.preventDefault();try{const r=await api('/api/admin/pricing',{method:'PATCH',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});document.getElementById('pricingMsg').style.color='var(--green)';document.getElementById('pricingMsg').textContent=`Saved at ${r.peakMultiplier}×`;toast('Peak pricing updated');}catch(x){document.getElementById('pricingMsg').textContent=x.message;}};
   document.getElementById('pwForm').onsubmit = async e => {
     e.preventDefault();
     const msgEl = document.getElementById('pwMsg');
@@ -1438,6 +1540,66 @@ async function settingsPage() {
   };
 }
 
+// ---------------- Customer: receipt / rating ----------------
+function printReceipt(r) {
+  const w=window.open('', '_blank', 'noopener,noreferrer,width=760,height=820');
+  if(!w) return toast('Please allow pop-ups to print the receipt.','warning');
+  w.document.write(`<!doctype html><html><head><title>Velan Travels Receipt ${esc(r.booking_id)}</title><style>body{font-family:Arial,sans-serif;padding:32px;max-width:700px;margin:auto;color:#18352a}h1{margin-bottom:4px}.box{border:1px solid #ddd;border-radius:12px;padding:18px;margin-top:18px}.row{display:flex;justify-content:space-between;gap:18px;padding:9px 0;border-bottom:1px solid #eee}.row:last-child{border:0}.amt{font-size:24px;font-weight:800}</style></head><body><h1>Velan Travels</h1><p>Booking Receipt</p><div class="box"><div class="row"><span>Booking ID</span><b>${esc(r.booking_id)}</b></div><div class="row"><span>Customer</span><b>${esc(r.customer_name)}</b></div><div class="row"><span>Mobile</span><b>${esc(r.mobile)}</b></div><div class="row"><span>Route</span><b>${esc(r.pickup_location)} → ${esc(r.drop_location)}</b></div><div class="row"><span>Date & Time</span><b>${esc(r.journey_date)} · ${esc(r.journey_time)}</b></div><div class="row"><span>Vehicle</span><b>${esc(r.vehicle_name||'-')} ${r.vehicle_number?'· '+esc(r.vehicle_number):''}</b></div><div class="row"><span>Status</span><b>${esc(r.status.replaceAll('_',' '))}</b></div><div class="row"><span>Fare</span><span class="amt">${r.estimated_fare?money(r.estimated_fare):'-'}</span></div></div><script>window.onload=()=>window.print();</script></body></html>`); w.document.close();
+}
+function showReviewForm(bookingId) {
+  const rating=prompt('Rate your trip from 1 to 5'); if(rating===null)return;
+  const n=Number(rating); if(!Number.isInteger(n)||n<1||n>5)return toast('Please enter a rating from 1 to 5.','error');
+  const comment=prompt('Optional feedback (up to 500 characters):')||'';
+  customerApi('/api/customer/bookings/'+encodeURIComponent(bookingId)+'/review',{method:'POST',body:JSON.stringify({rating:n,comment})}).then(()=>toast('Thank you for your feedback!')).catch(x=>toast(x.message,'error'));
+}
+
+// ---------------- Admin: Operations Center ----------------
+async function operations() {
+  loading(true);
+  try {
+    const [o, vs, reviews, audits, rev, notifications] = await Promise.all([api('/api/admin/operations'), api('/api/vehicles'), api('/api/admin/reviews'), api('/api/admin/audit'), api('/api/admin/revenue?days=30'), api('/api/admin/notifications')]);
+    adminShell('operations','Operations Center',`
+      <div class="stats-row"><div class="stat-card"><small>Fleet Available</small><b>${o.fleet.available||0}/${o.fleet.total||0}</b></div><div class="stat-card"><small>Driver Available</small><b>${o.drivers.available||0}/${o.drivers.total||0}</b></div><div class="stat-card pending"><small>Today's Unassigned</small><b>${o.unassigned||0}</b></div><div class="stat-card completed"><small>Average Rating</small><b>${Number(o.reviews.average||0).toFixed(1)} ★</b></div></div>
+      <div class="dash-grid"><div class="card"><h2>Peak Pricing</h2><p style="color:var(--muted)">Optional multiplier for new bookings.</p><form id="peakForm" style="display:flex;gap:10px;flex-wrap:wrap;align-items:end"><label class="field" style="flex:1;min-width:140px"><span>Multiplier</span><input name="multiplier" type="number" min="1" max="3" step="0.05" value="${o.peakMultiplier}"></label><label style="display:flex;gap:8px;align-items:center;padding:11px 0"><input name="enabled" type="checkbox" ${o.peakEnabled?'checked':''}> Enable peak pricing</label><button class="btn">Save</button></form></div>
+      <div class="card"><h2>Quick Tools</h2><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn secondary" id="backupBtn">Database Backup</button><button class="btn secondary" id="exportBtn">Export Bookings</button><a class="btn secondary" href="#analytics">Revenue Reports</a></div></div></div>
+      <div class="dash-grid"><div class="card"><h2>Revenue — 30 Days</h2><div class="stats-row" style="margin:0"><div class="stat-card"><small>Bookings</small><b>${rev.totals.bookings||0}</b></div><div class="stat-card completed"><small>Completed Revenue</small><b>${money(rev.totals.revenue||0)}</b></div><div class="stat-card pending"><small>Outstanding</small><b>${money(rev.totals.outstanding||0)}</b></div></div><div style="max-height:180px;overflow:auto;margin-top:12px"><table><tbody>${rev.rows.slice(-10).map(r=>`<tr><td>${esc(r.date)}</td><td>${r.bookings}</td><td>${money(r.revenue||0)}</td><td>${money(r.paid_revenue||0)}</td></tr>`).join('')||'<tr><td>No revenue data</td></tr>'}</tbody></table></div></div><div class="card"><h2>Notifications</h2>${notifications.length?notifications.slice(0,8).map(n=>`<div style="padding:9px 0;border-bottom:1px solid var(--border)"><b>${esc(n.title)}</b><div style="font-size:12px;color:var(--muted)">${esc(n.message)}</div></div>`).join(''):'<p style="color:var(--muted)">All clear — no urgent notifications.</p>'}</div></div>
+      <div class="dash-grid"><div class="card"><h2>Maintenance</h2><form id="maintForm" style="display:grid;gap:10px"><select name="vehicleId" required><option value="">Select vehicle</option>${vs.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.vehicle_number)}</option>`).join('')}</select><input name="maintenanceType" placeholder="Maintenance type (service/repair)" required><input type="date" name="dueDate"><textarea name="notes" placeholder="Service notes"></textarea><button class="btn">Log Maintenance</button></form></div>
+      <div class="card"><h2>Create Coupon</h2><form id="couponForm" style="display:grid;gap:10px"><input name="code" placeholder="Coupon code" required><select name="type"><option value="PERCENT">Percentage</option><option value="FLAT">Flat amount</option></select><input name="value" type="number" min="1" placeholder="Value" required><input name="minFare" type="number" min="0" placeholder="Minimum fare"><input name="maxDiscount" type="number" min="0" placeholder="Max discount (optional)"><input name="usageLimit" type="number" min="1" placeholder="Usage limit (optional)"><input name="expiresAt" type="date"><button class="btn">Create Coupon</button></form></div></div>
+      <div class="card"><h2>Recent Reviews</h2><div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Booking</th><th>Customer</th><th>Rating</th><th>Feedback</th></tr></thead><tbody>${reviews.length?reviews.slice(0,12).map(r=>`<tr><td>${esc(r.booking_id)}</td><td>${esc(r.customer_name)}</td><td>${'★'.repeat(r.rating)}${'☆'.repeat(5-r.rating)}</td><td>${esc(r.comment||'-')}</td></tr>`).join(''):'<tr><td colspan="4" class="empty">No reviews yet</td></tr>'}</tbody></table></div></div>
+      <div class="card"><h2>Audit Log</h2><div class="table-wrap" style="box-shadow:none"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Details</th></tr></thead><tbody>${audits.slice(0,15).map(a=>`<tr><td>${esc(a.created_at)}</td><td>${esc(a.actor_type)} · ${esc(a.actor||'-')}</td><td>${esc(a.action)}</td><td>${esc(a.details||'-')}</td></tr>`).join('')}</tbody></table></div></div>`);
+    const bell=document.getElementById('adminBell'); if(bell){ bell.onclick=()=>toast(notifications.length?`${notifications.length} notification(s) need attention.`:'No new notifications.',notifications.length?'warning':''); }
+    document.getElementById('peakForm').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target));await api('/api/admin/settings/peak',{method:'PATCH',body:JSON.stringify({enabled:!!e.target.enabled.checked,multiplier:Number(f.multiplier)})});toast('Peak pricing settings saved.');operations();};
+    document.getElementById('maintForm').onsubmit=async e=>{e.preventDefault();await api('/api/admin/maintenance',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Maintenance record added.');operations();};
+    document.getElementById('couponForm').onsubmit=async e=>{e.preventDefault();const f=Object.fromEntries(new FormData(e.target)); await api('/api/admin/promos',{method:'POST',body:JSON.stringify({code:f.code,discountType:f.type,discountValue:f.value,minFare:f.minFare,maxDiscount:f.maxDiscount,expiresAt:f.expiresAt})});toast('Coupon created.');e.target.reset();};
+    document.getElementById('backupBtn').onclick=async()=>{const r=await fetch('/api/admin/backup',{headers:{Authorization:'Bearer '+token}});if(!r.ok)return toast('Backup failed','error');const blob=await r.blob(),u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='velan-travels-backup-'+todayStr()+'.db';a.click();URL.revokeObjectURL(u);toast('Database backup prepared.');};
+    document.getElementById('exportBtn').onclick=()=>exportBookingsCsv();
+  } catch(e) { toast(e.message,'error'); }
+}
+
+async function maintenancePage(){ loading(true); try{ const [rows,vehicles]=await Promise.all([api('/api/admin/maintenance'),api('/api/vehicles')]); adminShell('maintenance','Vehicle Maintenance',`<div class="card"><form id="mf" class="field-grid"><div class="field"><label>Vehicle</label><select name="vehicleId">${vehicles.map(v=>`<option value="${v.id}">${esc(v.name)} · ${esc(v.vehicle_number)}</option>`).join('')}</select></div><div class="field"><label>Maintenance Type</label><input name="maintenanceType" placeholder="Service / Tyres / Insurance" required></div><div class="field"><label>Due Date</label><input type="date" name="dueDate"></div><div class="field"><label>Notes</label><input name="notes"></div><button class="btn">Add Maintenance</button></form></div><div class="table-wrap"><table><thead><tr><th>Vehicle</th><th>Type</th><th>Due</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.vehicle_name)} · ${esc(r.vehicle_number)}</td><td>${esc(r.maintenance_type)}</td><td>${esc(r.due_date||'-')}</td><td>${r.completed?'Completed':'Pending'}</td><td>${r.completed?'':'<button class="btn secondary" data-mid="'+r.id+'">Mark Done</button>'}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">No maintenance records</td></tr>'}</tbody></table></div>`); document.getElementById('mf').onsubmit=async e=>{e.preventDefault();await api('/api/admin/maintenance',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Maintenance added');maintenancePage();};document.querySelectorAll('[data-mid]').forEach(b=>b.onclick=async()=>{await api('/api/admin/maintenance/'+b.dataset.mid,{method:'PATCH',body:JSON.stringify({completed:true})});maintenancePage();}); }catch(e){toast(e.message,'error');}}
+async function promosPage(){ loading(true); try{const rows=await api('/api/admin/promos'); adminShell('promos','Promo Codes',`<div class="card"><form id="pf" class="field-grid"><div class="field"><label>Code</label><input name="code" placeholder="SAVE10" required></div><div class="field"><label>Type</label><select name="discountType"><option value="PERCENT">Percent</option><option value="FLAT">Flat</option></select></div><div class="field"><label>Discount</label><input type="number" name="discountValue" min="0" required></div><div class="field"><label>Max Discount</label><input type="number" name="maxDiscount" min="0"></div><div class="field"><label>Minimum Fare</label><input type="number" name="minFare" min="0"></div><div class="field"><label>Expires</label><input type="date" name="expiresAt"></div><button class="btn">Create Promo</button></form></div><div class="table-wrap"><table><thead><tr><th>Code</th><th>Discount</th><th>Expires</th><th>Status</th><th></th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.code)}</td><td>${r.discount_type==='FLAT'?money(r.discount_value):r.discount_value+'%'}</td><td>${esc(r.expires_at||'-')}</td><td>${r.active?'Active':'Disabled'}</td><td><button class="btn secondary" data-pid="${r.id}" data-active="${r.active?'0':'1'}">${r.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5" class="empty">No promo codes</td></tr>'}</tbody></table></div>`);document.getElementById('pf').onsubmit=async e=>{e.preventDefault();await api('/api/admin/promos',{method:'POST',body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});toast('Promo created');promosPage();};document.querySelectorAll('[data-pid]').forEach(b=>b.onclick=async()=>{await api('/api/admin/promos/'+b.dataset.pid,{method:'PATCH',body:JSON.stringify({active:b.dataset.active==='1'})});promosPage();});}catch(e){toast(e.message,'error');}}
+async function auditPage(){loading(true);try{const rows=await api('/api/admin/audit');adminShell('audit','Audit Log',`<div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th><th>Details</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${esc(r.created_at)}</td><td>${esc(r.actor_type)} · ${esc(r.actor)}</td><td>${esc(r.action)}</td><td>${esc(r.entity_type)} #${esc(r.entity_id)}</td><td>${esc(r.details||'-')}</td></tr>`).join('')||'<tr><td colspan="5" class="empty">No audit events</td></tr>'}</tbody></table></div>`);}catch(e){toast(e.message,'error');}}
+
+// ---------------- Admin: Booking Calendar ----------------
+async function calendarPage() {
+  loading(true);
+  const now = new Date();
+  const from = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0,10);
+  const to = new Date(now.getFullYear(), now.getMonth()+1, 0).toISOString().slice(0,10);
+  try {
+    const rows = await api(`/api/admin/calendar?from=${from}&to=${to}`);
+    const byDate = {};
+    rows.forEach(r => (byDate[r.journey_date] ||= []).push(r));
+    const days = [];
+    for (let d=new Date(from+'T00:00:00'); d<=new Date(to+'T00:00:00'); d.setDate(d.getDate()+1)) {
+      const key=d.toISOString().slice(0,10), list=byDate[key]||[];
+      days.push(`<div class="card" style="min-height:120px"><b>${key}</b><div style="margin-top:8px;display:grid;gap:6px">${list.length?list.map(r=>`<div style="padding:7px;border:1px solid var(--border);border-radius:8px"><b>${esc(r.journey_time)}</b> · ${esc(r.booking_id)} <span class="status-pill status-${r.status}" style="float:right">${r.status.replaceAll('_',' ')}</span><div style="font-size:12px;color:var(--muted);margin-top:3px">${esc(r.customer_name)} · ${esc(r.vehicle_name||'Unassigned')}</div></div>`).join(''):'<span style="color:var(--muted);font-size:12px">No bookings</span>'}</div></div>`);
+    }
+    adminShell('calendar','Booking Calendar',`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><p style="color:var(--muted);margin:0">Current month booking schedule</p><button class="btn secondary" id="calExport">Export CSV</button></div><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr));padding:0">${days.join('')}</div>`);
+    document.getElementById('calExport').onclick=()=>exportBookingsCsv({date:''});
+  } catch(e) { toast(e.message,'error'); }
+}
+
 // ---------------- Router ----------------
 function router() {
   const h = location.hash.replace('#', '') || 'home';
@@ -1449,8 +1611,13 @@ function router() {
   if (h === 'my-bookings') return myBookings();
   if (h === 'dashboard') return dashboard();
   if (h === 'analytics') return analytics();
+  if (h === 'calendar') return calendarPage();
+  if (h === 'operations') return operations();
   if (h === 'customers') return customers();
   if (h === 'settings') return settingsPage();
+  if (h === 'maintenance') return maintenancePage();
+  if (h === 'promos') return promosPage();
+  if (h === 'audit') return auditPage();
   if (h === 'bookings') return bookings();
   if (h === 'vehicles') return vehicles();
   if (h === 'drivers') return drivers();
