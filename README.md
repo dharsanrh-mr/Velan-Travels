@@ -76,6 +76,8 @@ GET `/api/admin/dashboard` *(admin)*
 GET `/api/admin/analytics` *(admin)* — revenue by month, top routes, top vehicles
 GET `/api/admin/customers?q=` *(admin)* — paginated (`?limit=&offset=`, default 50/page), total count in `X-Total-Count` header
 GET `/api/admin/activity` *(admin)* — recent booking activity feed
+GET `/api/admin/notifications` *(admin)* — latest booking timeline notifications
+GET `/api/bookings/:bookingId` — booking details plus status timeline
 PATCH `/api/admin/settings/password` *(admin)*
 GET `/api/admin/bookings?status=&date=&q=` *(admin)* — paginated (`?limit=&offset=`, default 50/page), total count in `X-Total-Count` header
 PATCH `/api/admin/bookings/:id/status` *(admin)*
@@ -143,3 +145,10 @@ Set the Twilio variables in `backend/.env` and choose `NOTIFY_CHANNEL=sms`, `wha
 - Admin sessions are revoked after a password change.
 - Expired sessions are periodically cleaned from SQLite.
 - Set `TRUST_PROXY=1` only when the app is behind one trusted reverse proxy.
+
+
+## Added in this update
+- Booking timeline events are recorded for new bookings, edits, cancellations, driver assignment and every status change.
+- Customer booking history now includes each booking's timeline.
+- Admin dashboard API now exposes today's booking count, today's active/pending count and today's completed revenue.
+- Admin notification endpoint provides the latest timeline events for a notification center.
