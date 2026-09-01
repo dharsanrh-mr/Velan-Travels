@@ -84,3 +84,15 @@ CREATE TABLE IF NOT EXISTS bookings (
   FOREIGN KEY(vehicle_id) REFERENCES vehicles(id) ON DELETE SET NULL,
   FOREIGN KEY(driver_id) REFERENCES drivers(id) ON DELETE SET NULL
 );
+
+
+-- Immutable booking timeline for customer/admin visibility.
+CREATE TABLE IF NOT EXISTS booking_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  booking_id INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_booking_events_booking ON booking_events(booking_id, created_at);
