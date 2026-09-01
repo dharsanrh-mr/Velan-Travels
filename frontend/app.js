@@ -217,7 +217,7 @@ function home() {
     <div class="hero-content">
       <div class="hero-copy">
         <span class="hero-kicker">PREMIUM TRAVEL • LOCAL & OUTSTATION</span>
-        <h1>Your journey,<br><span>our responsibility.</span></h1>
+        <h1>Your Journey,<br><span>Our Priority.</span></h1>
         <p>Safe, comfortable and on-time travel with professionally maintained vehicles and trusted drivers.</p>
         <div class="hero-actions">
           <a class="btn hero-primary" href="#book">Book Your Trip <span>→</span></a>
